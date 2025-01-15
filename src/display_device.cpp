@@ -968,34 +968,10 @@ namespace display_device {
   }
 
   void configure_display(const SingleDisplayConfiguration &config) {
-    std::lock_guard lock {DD_DATA.mutex};
-    if (!DD_DATA.sm_instance) {
-      // Platform is not supported, nothing to do.
-      return;
-    }
-
-    BOOST_LOG(info) << "Scheduling display device configuration:\n"
-                    << toJson(config);
-
-    DD_DATA.sm_instance->schedule([config](auto &settings_iface, auto &stop_token) {
-      using enum SettingsManagerInterface::ApplyResult;
-
-      // We only want to keep retrying in case of a transient errors.
-      // In other cases, when we either fail or succeed we just want to stop...
-      const auto result {settings_iface.applySettings(config)};
-      if (result == Ok) {
-        BOOST_LOG(info) << "Display device configuration applied successfully.";
-      } else if (result == ApiTemporarilyUnavailable) {
-        BOOST_LOG(warning) << "Display device configuration API is temporarily unavailable. Will retry.";
-      } else {
-        BOOST_LOG(error) << "Display device configuration failed with result: " << apply_result_name(result);
-      }
-
-      if (result != ApiTemporarilyUnavailable) {
-        stop_token.requestStop();
-      }
-    },
-                                  {.m_sleep_durations = {DEFAULT_RETRY_INTERVAL}});
+    // A Duo session has no physical display to reconfigure. The monitor belongs to the DuoIdd
+    // driver, which applies the mode it is handed through the shared capture buffer, so the
+    // Windows display settings manager has nothing it could change here.
+    (void) config;
   }
 
   void revert_configuration() {

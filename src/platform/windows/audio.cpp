@@ -1116,38 +1116,12 @@ namespace platf::audio {
      * @param sink Audio sink name to route or capture.
      * @return Status from updating sink.
      */
-    int set_sink(const std::string &sink) override {
-      if (config::audio.external_audio) {
-        return 0;
-      }
-
-      auto device_id = set_format(sink);
-      if (!device_id) {
-        return -1;
-      }
-
-      int failure {};
-      for (int x = 0; x < (int) ERole_enum_count; ++x) {
-        auto status = policy->SetDefaultEndpoint(device_id->c_str(), (ERole) x);
-        if (status) {
-          // Depending on the format of the string, we could get either of these errors
-          if (status == HRESULT_FROM_WIN32(ERROR_NOT_FOUND) || status == E_INVALIDARG) {
-            BOOST_LOG(warning) << "Audio sink not found: "sv << sink;
-          } else {
-            BOOST_LOG(warning) << "Couldn't set ["sv << sink << "] to role ["sv << x << "]: 0x"sv << util::hex(status).to_string_view();
-          }
-
-          ++failure;
-        }
-      }
-
-      // Remember the assigned sink name, so we have it for later if we need to set it
-      // back after another application changes it
-      if (!failure) {
-        assigned_sink = sink;
-      }
-
-      return failure;
+    int set_sink(const std::string &) override {
+      // A Duo session cannot reassign the system default audio endpoint - the endpoint a session
+      // sees is the one TermService gave it, and writing the default roles from inside the session
+      // does not stick. Audio is still captured from the configured sink; only the default-endpoint
+      // write is skipped.
+      return 0;
     }
 
     /**

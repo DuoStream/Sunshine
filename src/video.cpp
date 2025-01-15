@@ -2444,6 +2444,21 @@ namespace video {
     auto idr_events = mail->event<bool>(mail::idr);
     auto invalidate_ref_frames_events = mail->event<std::pair<int64_t, int64_t>>(mail::invalidate_ref_frames);
 
+#ifdef _WIN32
+    // The DuoIdd display driver paces its own captures on this event. Signalling it once a frame
+    // has actually been encoded - rather than once a frame has been produced - is what stops the
+    // driver queueing frames faster than the encoder can take them.
+    HANDLE frame_encoded_event = nullptr;
+    {
+      DWORD session_id = 0;
+      if (ProcessIdToSessionId(GetCurrentProcessId(), &session_id)) {
+        char event_name[32];
+        sprintf(event_name, "Global\\DuoIdd%uFrameEncoded", (unsigned) session_id);
+        frame_encoded_event = OpenEventA(EVENT_ALL_ACCESS, FALSE, event_name);
+      }
+    }
+#endif
+
     {
       // Load a dummy image into the AVFrame to ensure we have something to encode
       // even if we timeout waiting on the first frame. This is a relatively large
@@ -2506,6 +2521,12 @@ namespace video {
         BOOST_LOG(error) << "Could not encode video packet"sv;
         return;
       }
+
+#ifdef _WIN32
+      if (frame_encoded_event) {
+        SetEvent(frame_encoded_event);
+      }
+#endif
 
       session->request_normal_frame();
 

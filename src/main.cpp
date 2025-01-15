@@ -297,17 +297,11 @@ int main(int argc, char *argv[]) {
   }
 
 #ifdef _WIN32
-  // Modify relevant NVIDIA control panel settings if the system has corresponding gpu
-  if (nvprefs_instance.load()) {
-    // Restore global settings to the undo file left by improper termination of sunshine.exe
-    nvprefs_instance.restore_from_and_delete_undo_file_if_exists();
-    // Modify application settings for sunshine.exe
-    nvprefs_instance.modify_application_profile();
-    // Modify global settings, undo file is produced in the process to restore after improper termination
-    nvprefs_instance.modify_global_profile();
-    // Unload dynamic library to survive driver re-installation
-    nvprefs_instance.unload();
-  }
+  // Sunshine's NVIDIA control panel profiles are not applied. A Duo session renders through the
+  // DuoIdd display driver, so the per-application and global driver profiles sunshine would write
+  // have nothing to act on, and writing them leaves an undo file behind that outlives the session
+  // and survives a driver re-install. The restore path below is left in place for a user who
+  // applied those profiles some other way.
 
   // Wait as long as possible to terminate Sunshine.exe during logoff/shutdown
   SetProcessShutdownParameters(0x100, SHUTDOWN_NORETRY);
@@ -464,6 +458,7 @@ int main(int argc, char *argv[]) {
 
   if (video::probe_encoders()) {
     BOOST_LOG(error) << "Video failed to find working encoder"sv;
+    return -1;
   }
 
   if (http::init()) {
