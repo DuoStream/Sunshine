@@ -71,8 +71,7 @@ const config = ref(props.config)
             <option value="x11">X11</option>
           </template>
           <template #windows>
-            <option value="ddx">Desktop Duplication API</option>
-            <option value="wgc">Windows.Graphics.Capture {{ $t('_common.beta') }}</option>
+            <option value="ddx">Duo Monitor Capture</option>
           </template>
         </PlatformLayout>
       </select>

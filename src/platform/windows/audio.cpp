@@ -828,6 +828,10 @@ namespace platf::audio {
 
     int
     set_sink(const std::string &sink) override {
+      if (GetSystemMetrics(SM_REMOTESESSION)) {
+        return 0;
+      }
+
       auto device_id = set_format(sink);
       if (!device_id) {
         return -1;

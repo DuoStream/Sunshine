@@ -1,5 +1,8 @@
 {
-  "env": {},
+  "env": {
+    "PATH": "$(PATH);$(ProgramFiles(x86))\\Steam",
+    "VPROJECT": "steammulti"
+  },
   "apps": [
     {
       "name": "Desktop",
@@ -7,10 +10,15 @@
     },
     {
       "name": "Steam Big Picture",
-      "cmd": "steam://open/bigpicture",
+      "output": "",
+      "cmd": "cmd \/c \"steam.exe\" -master_ipc_name_override InstanceName -userchooser InstanceName -gamepadui",
+      "exclude-global-prep-cmd": "false",
+      "elevated": "false",
       "auto-detach": "true",
       "wait-all": "true",
-      "image-path": "steam.png"
+      "exit-timeout": "5",
+      "image-path": "steam.png",
+      "working-dir": "C:\\Program Files (x86)\\Steam"
     }
   ]
 }

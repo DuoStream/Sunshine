@@ -33,6 +33,13 @@
   // from_utf8() string conversion function
   #include "platform/windows/misc.h"
 
+  // We have to include boost/process.hpp before display.h due to WinSock.h,
+  // but that prevents the definition of NTSTATUS so we must define it ourself.
+  typedef long NTSTATUS;
+
+  // RdpIddCaptureBuffer & RdpIddCaptureMode structures
+  #include "platform/windows/display.h"
+
   // _SH constants for _wfsopen()
   #include <share.h>
 #endif
@@ -137,6 +144,44 @@ namespace proc {
 
   int
   proc_t::execute(int app_id, std::shared_ptr<rtsp_stream::launch_session_t> launch_session) {
+    // Puzzle together the current session's shared buffer name
+    DWORD sessionId = 0;
+    ProcessIdToSessionId(GetCurrentProcessId(), &sessionId);
+    std::string sharedBufferName = "Global\\RdpIddCaptureBuffer" + std::to_string(sessionId);
+
+    // Open the shared buffer
+    HANDLE sharedBufferHandle = OpenFileMappingA(FILE_MAP_ALL_ACCESS, FALSE, sharedBufferName.c_str());
+
+    // We managed to open the shared buffer handle
+    if (sharedBufferHandle != NULL)
+    {
+      // Map the shared buffer
+      platf::dxgi::PRdpIddCaptureBuffer sharedBuffer = (platf::dxgi::PRdpIddCaptureBuffer)MapViewOfFile(sharedBufferHandle, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(platf::dxgi::RdpIddCaptureBuffer));
+
+      // We managed to map the shared buffer
+      if (sharedBuffer != NULL)
+      {
+        // We need to adjust the mode
+        if (sharedBuffer->Mode.Width != launch_session->width || sharedBuffer->Mode.Height != launch_session->height || sharedBuffer->Mode.RefreshRate != launch_session->fps || (!sharedBuffer->Mode.IsIddCx19Based && sharedBuffer->Mode.HDR != launch_session->enable_hdr))
+        {
+          // Copy over the parameters
+          sharedBuffer->Mode.Width = launch_session->width;
+          sharedBuffer->Mode.Height = launch_session->height;
+          sharedBuffer->Mode.RefreshRate = launch_session->fps;
+          sharedBuffer->Mode.HDR = !sharedBuffer->Mode.IsIddCx19Based && launch_session->enable_hdr;
+
+          // Request a mode change
+          sharedBuffer->ModeChangePending = TRUE;
+        }
+
+        // Unmap the shared buffer
+        UnmapViewOfFile(sharedBuffer);
+      }
+
+      // Close the shared buffer handle
+      CloseHandle(sharedBufferHandle);
+    }
+
     // Ensure starting from a clean slate
     terminate();
 

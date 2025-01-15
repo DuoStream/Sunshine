@@ -143,6 +143,7 @@ main(int argc, char *argv[]) {
   }
 
 #ifdef WIN32
+  /*
   // Modify relevant NVIDIA control panel settings if the system has corresponding gpu
   if (nvprefs_instance.load()) {
     // Restore global settings to the undo file left by improper termination of sunshine.exe
@@ -154,6 +155,7 @@ main(int argc, char *argv[]) {
     // Unload dynamic library to survive driver re-installation
     nvprefs_instance.unload();
   }
+  */
 
   // Wait as long as possible to terminate Sunshine.exe during logoff/shutdown
   SetProcessShutdownParameters(0x100, SHUTDOWN_NORETRY);
@@ -296,6 +298,7 @@ main(int argc, char *argv[]) {
 
   if (video::probe_encoders()) {
     BOOST_LOG(error) << "Video failed to find working encoder"sv;
+    return -1;
   }
 
   if (http::init()) {

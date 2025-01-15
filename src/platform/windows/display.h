@@ -11,19 +11,105 @@
 #include <dxgi.h>
 #include <dxgi1_6.h>
 
-#include <Unknwn.h>
-#include <winrt/Windows.Graphics.Capture.h>
-
 #include "src/platform/common.h"
 #include "src/utility.h"
 #include "src/video.h"
 
 namespace platf::dxgi {
+  float GetPrimaryMonitorScale(PRECT desktopRectangle);
+
+  /// <summary>
+  /// A monitor mode.
+  /// </summary>
+  typedef struct _RdpIddCaptureMode
+  {
+    /// <summary>
+    /// Whether this monitor is IddCx 1.9 based or not.
+    /// </summary>
+    BOOL IsIddCx19Based;
+
+    /// <summary>
+    /// The IddCx driver instance.
+    /// </summary>
+    LPVOID Instance;
+
+    /// <summary>
+    /// The IddCx adapter object.
+    /// </summary>
+    LPVOID AdapterObject;
+
+    /// <summary>
+    /// The IddCx monitor object.
+    /// </summary>
+    LPVOID MonitorObject;
+
+    /// <summary>
+    /// The width of the monitor in pixel.
+    /// </summary>
+    UINT Width;
+
+    /// <summary>
+    /// The height of the monitor in pixel.
+    /// </summary>
+    UINT Height;
+
+    /// <summary>
+    /// The refresh rate of the monitor in Hz.
+    /// </summary>
+    UINT RefreshRate;
+
+    /// <summary>
+    /// The scale factor of the monitor in percent.
+    /// </summary>
+    UINT ScaleFactor;
+
+    /// <summary>
+    /// The color mode of the monitor.
+    /// </summary>
+    BOOL HDR;
+  } __attribute__((packed, aligned(1))) RdpIddCaptureMode, * PRdpIddCaptureMode;
+
+  /// <summary>
+  /// The RdpIddCapture buffer.
+  /// </summary>
+  typedef struct _RdpIddCaptureBuffer
+  {
+    /// <summary>
+    /// The wudfhost.exe process ID.
+    /// </summary>
+    DWORD WUDFHostProcessId;
+
+    /// <summary>
+    /// The wudfhost.exe frame buffer handle.
+    /// </summary>
+    HANDLE WUDFHostFrameBufferHandle;
+
+    /// <summary>
+    /// The number of captured frames.
+    /// </summary>
+    UINT CapturedFrames;
+
+    /// <summary>
+    /// The number of encoded frames.
+    /// </summary>
+    UINT EncodedFrames;
+
+    /// <summary>
+    /// The monitor mode.
+    /// </summary>
+    RdpIddCaptureMode Mode;
+
+    /// <summary>
+    /// Whether a mode change is pending or not.
+    /// </summary>
+    BOOL ModeChangePending;
+  } __attribute__((packed, aligned(1))) RdpIddCaptureBuffer, * PRdpIddCaptureBuffer;
+
   extern const char *format_str[];
 
   // Add D3D11_CREATE_DEVICE_DEBUG here to enable the D3D11 debug runtime.
   // You should have a debugger like WinDbg attached to receive debug messages.
-  auto constexpr D3D11_CREATE_DEVICE_FLAGS = 0;
+  auto constexpr D3D11_CREATE_DEVICE_FLAGS = D3D11_CREATE_DEVICE_VIDEO_SUPPORT;
 
   template <class T>
   void
@@ -156,6 +242,27 @@ namespace platf::dxgi {
     bool visible;
   };
 
+  class duplication_t {
+  private:
+    HANDLE sharedBufferHandle {};
+    PRdpIddCaptureBuffer sharedBuffer {};
+    ID3D11Device* frameReaderDevice {};
+    HANDLE wudfFrameBufferHandle {};
+    HANDLE frameBufferHandle {};
+    ID3D11Texture2D* frameBufferTexture {};
+    D3D11_TEXTURE2D_DESC frameBufferTextureDescription {};
+    RdpIddCaptureMode mode {};
+    UINT encodedFrames {};
+    void map_shared_buffer(ID3D11Device* baseDevice);
+  public:
+    capture_e iddblt(ID3D11Device* baseDevice, ID3D11Resource** texture);
+    void resumeSwapChain();
+    bool test(IDXGIAdapter1* baseAdapter1);
+    bool test(ID3D11Device* baseDevice);
+    void reset();
+    void changeMode(const ::video::config_t &config);
+  };
+
   class display_base_t: public display_t {
   public:
     int
@@ -169,6 +276,7 @@ namespace platf::dxgi {
     output_t output;
     device_t device;
     device_ctx_t device_ctx;
+    duplication_t dup;
     DXGI_RATIONAL display_refresh_rate;
     int display_refresh_rate_rounded;
 
@@ -236,32 +344,30 @@ namespace platf::dxgi {
     virtual bool
     get_hdr_metadata(SS_HDR_METADATA &metadata) override;
 
-    const char *
-    dxgi_format_to_string(DXGI_FORMAT format);
-    const char *
-    colorspace_to_string(DXGI_COLOR_SPACE_TYPE type);
-    virtual std::vector<DXGI_FORMAT>
-    get_supported_capture_formats() = 0;
-
   protected:
     int
     get_pixel_pitch() {
       return (capture_format == DXGI_FORMAT_R16G16B16A16_FLOAT) ? 8 : 4;
     }
 
+    const char *
+    dxgi_format_to_string(DXGI_FORMAT format);
+    const char *
+    colorspace_to_string(DXGI_COLOR_SPACE_TYPE type);
+
     virtual capture_e
     snapshot(const pull_free_image_cb_t &pull_free_image_cb, std::shared_ptr<platf::img_t> &img_out, std::chrono::milliseconds timeout, bool cursor_visible) = 0;
-    virtual capture_e
-    release_snapshot() = 0;
     virtual int
     complete_img(img_t *img, bool dummy) = 0;
+    virtual std::vector<DXGI_FORMAT>
+    get_supported_capture_formats() = 0;
   };
 
-  /**
-   * Display component for devices that use software encoders.
-   */
   class display_ram_t: public display_base_t {
   public:
+    virtual capture_e
+    snapshot(const pull_free_image_cb_t &pull_free_image_cb, std::shared_ptr<platf::img_t> &img_out, std::chrono::milliseconds timeout, bool cursor_visible) override;
+
     std::shared_ptr<img_t>
     alloc_img() override;
     int
@@ -271,18 +377,22 @@ namespace platf::dxgi {
     std::vector<DXGI_FORMAT>
     get_supported_capture_formats() override;
 
+    int
+    init(const ::video::config_t &config, const std::string &display_name);
+
     std::unique_ptr<avcodec_encode_device_t>
     make_avcodec_encode_device(pix_fmt_e pix_fmt) override;
 
+    cursor_t cursor;
     D3D11_MAPPED_SUBRESOURCE img_info;
     texture2d_t texture;
   };
 
-  /**
-   * Display component for devices that use hardware encoders.
-   */
   class display_vram_t: public display_base_t, public std::enable_shared_from_this<display_vram_t> {
   public:
+    virtual capture_e
+    snapshot(const pull_free_image_cb_t &pull_free_image_cb, std::shared_ptr<platf::img_t> &img_out, std::chrono::milliseconds timeout, bool cursor_visible) override;
+
     std::shared_ptr<img_t>
     alloc_img() override;
     int
@@ -291,6 +401,9 @@ namespace platf::dxgi {
     complete_img(img_t *img_base, bool dummy) override;
     std::vector<DXGI_FORMAT>
     get_supported_capture_formats() override;
+
+    int
+    init(const ::video::config_t &config, const std::string &display_name);
 
     bool
     is_codec_supported(std::string_view name, const ::video::config_t &config) override;
@@ -301,59 +414,6 @@ namespace platf::dxgi {
     std::unique_ptr<nvenc_encode_device_t>
     make_nvenc_encode_device(pix_fmt_e pix_fmt) override;
 
-    std::atomic<uint32_t> next_image_id;
-  };
-
-  /**
-   * Display duplicator that uses the DirectX Desktop Duplication API.
-   */
-  class duplication_t {
-  public:
-    dup_t dup;
-    bool has_frame {};
-    std::chrono::steady_clock::time_point last_protected_content_warning_time {};
-
-    int
-    init(display_base_t *display, const ::video::config_t &config);
-    capture_e
-    next_frame(DXGI_OUTDUPL_FRAME_INFO &frame_info, std::chrono::milliseconds timeout, resource_t::pointer *res_p);
-    capture_e
-    reset(dup_t::pointer dup_p = dup_t::pointer());
-    capture_e
-    release_frame();
-
-    ~duplication_t();
-  };
-
-  /**
-   * Display backend that uses DDAPI with a software encoder.
-   */
-  class display_ddup_ram_t: public display_ram_t {
-  public:
-    int
-    init(const ::video::config_t &config, const std::string &display_name);
-    capture_e
-    snapshot(const pull_free_image_cb_t &pull_free_image_cb, std::shared_ptr<platf::img_t> &img_out, std::chrono::milliseconds timeout, bool cursor_visible) override;
-    capture_e
-    release_snapshot() override;
-
-    duplication_t dup;
-    cursor_t cursor;
-  };
-
-  /**
-   * Display backend that uses DDAPI with a hardware encoder.
-   */
-  class display_ddup_vram_t: public display_vram_t {
-  public:
-    int
-    init(const ::video::config_t &config, const std::string &display_name);
-    capture_e
-    snapshot(const pull_free_image_cb_t &pull_free_image_cb, std::shared_ptr<platf::img_t> &img_out, std::chrono::milliseconds timeout, bool cursor_visible) override;
-    capture_e
-    release_snapshot() override;
-
-    duplication_t dup;
     sampler_state_t sampler_linear;
 
     blend_t blend_alpha;
@@ -369,64 +429,7 @@ namespace platf::dxgi {
     texture2d_t old_surface_delayed_destruction;
     std::chrono::steady_clock::time_point old_surface_timestamp;
     std::variant<std::monostate, texture2d_t, std::shared_ptr<platf::img_t>> last_frame_variant;
-  };
 
-  /**
-   * Display duplicator that uses the Windows.Graphics.Capture API.
-   */
-  class wgc_capture_t {
-    winrt::Windows::Graphics::DirectX::Direct3D11::IDirect3DDevice uwp_device { nullptr };
-    winrt::Windows::Graphics::Capture::GraphicsCaptureItem item { nullptr };
-    winrt::Windows::Graphics::Capture::Direct3D11CaptureFramePool frame_pool { nullptr };
-    winrt::Windows::Graphics::Capture::GraphicsCaptureSession capture_session { nullptr };
-    winrt::Windows::Graphics::Capture::Direct3D11CaptureFrame produced_frame { nullptr }, consumed_frame { nullptr };
-    SRWLOCK frame_lock = SRWLOCK_INIT;
-    CONDITION_VARIABLE frame_present_cv;
-
-    void
-    on_frame_arrived(winrt::Windows::Graphics::Capture::Direct3D11CaptureFramePool const &sender, winrt::Windows::Foundation::IInspectable const &);
-
-  public:
-    wgc_capture_t();
-    ~wgc_capture_t();
-
-    int
-    init(display_base_t *display, const ::video::config_t &config);
-    capture_e
-    next_frame(std::chrono::milliseconds timeout, ID3D11Texture2D **out, uint64_t &out_time);
-    capture_e
-    release_frame();
-    int
-    set_cursor_visible(bool);
-  };
-
-  /**
-   * Display backend that uses Windows.Graphics.Capture with a software encoder.
-   */
-  class display_wgc_ram_t: public display_ram_t {
-    wgc_capture_t dup;
-
-  public:
-    int
-    init(const ::video::config_t &config, const std::string &display_name);
-    capture_e
-    snapshot(const pull_free_image_cb_t &pull_free_image_cb, std::shared_ptr<platf::img_t> &img_out, std::chrono::milliseconds timeout, bool cursor_visible) override;
-    capture_e
-    release_snapshot() override;
-  };
-
-  /**
-   * Display backend that uses Windows.Graphics.Capture with a hardware encoder.
-   */
-  class display_wgc_vram_t: public display_vram_t {
-    wgc_capture_t dup;
-
-  public:
-    int
-    init(const ::video::config_t &config, const std::string &display_name);
-    capture_e
-    snapshot(const pull_free_image_cb_t &pull_free_image_cb, std::shared_ptr<platf::img_t> &img_out, std::chrono::milliseconds timeout, bool cursor_visible) override;
-    capture_e
-    release_snapshot() override;
+    std::atomic<uint32_t> next_image_id;
   };
 }  // namespace platf::dxgi

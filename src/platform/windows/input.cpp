@@ -3,9 +3,21 @@
  * @brief Definitions for input handling on Windows.
  */
 #define WINVER 0x0A00
+#include <boost/property_tree/ptree.hpp>
+#include <boost/property_tree/json_parser.hpp>
 #include <windows.h>
+#include <initguid.h>
+#include <devguid.h>
+#include <cfgmgr32.h>
+#include <setupapi.h>
+#include <usbioctl.h>
+#include <devpropdef.h>
+#include <devpkey.h>
+#include <Hidclass.h>
 
 #include <cmath>
+#include <set>
+#include <numeric>
 #include <thread>
 
 #include <ViGEm/Client.h>
@@ -26,6 +38,17 @@ InjectSyntheticPointerInput(HSYNTHETICPOINTERDEVICE device, CONST POINTER_TYPE_I
 WINUSERAPI VOID WINAPI
 DestroySyntheticPointerDevice(HSYNTHETICPOINTERDEVICE device);
 #endif
+
+/// <summary>
+/// Taken from cfgmgr32.h, not yet documented in the w32api MinGW headers.
+/// </summary>
+static CONFIGRET WINAPI (*CM_Get_DevNode_PropertyW_DynLib)(DEVINST dnDevInst, const DEVPROPKEY* PropertyKey, DEVPROPTYPE* PropertyType, PBYTE PropertyBuffer, PULONG PropertyBufferSize, ULONG ulFlags);
+static CONFIGRET WINAPI (*CM_Set_DevNode_PropertyW_DynLib)(DEVINST dnDevInst, const DEVPROPKEY* PropertyKey, DEVPROPTYPE PropertyType, const PBYTE PropertyBuffer, ULONG PropertyBufferSize, ULONG ulFlags);
+
+VOID EndViGEmAddTarget(PVIGEM_CLIENT Client, PVIGEM_TARGET Target, VIGEM_ERROR Result)
+{
+  return;
+}
 
 namespace platf {
   using namespace std::literals;
@@ -191,6 +214,185 @@ namespace platf {
   }
 
   class vigem_t {
+  private:
+    /// <summary>
+    /// The ViGEmBus device instance path.
+    /// </summary>
+    wchar_t ViGEmBusInstancePath[MAX_DEVICE_ID_LEN];
+
+    /// <summary>
+    /// Find the device instance path of the first device that matches the given description.
+    /// </summary>
+    /// <param name="deviceDescription">Description</param>
+    /// <param name="deviceInstancePath">Instance path buffer</param>
+    /// <param name="deviceInstancePathSize">Instance path buffer size</param>
+    /// <returns>Result</returns>
+    BOOL GetDeviceInstancePath(const wchar_t* deviceDescription, wchar_t* deviceInstancePath, DWORD deviceInstancePathSize) {
+      // Initialize SetupAPI
+      HDEVINFO deviceInfoSet = SetupDiGetClassDevsW(NULL, NULL, NULL, DIGCF_ALLCLASSES | DIGCF_PRESENT);
+      if (deviceInfoSet == INVALID_HANDLE_VALUE) {
+        return FALSE;
+      }
+
+      // Enumerate devices
+      SP_DEVINFO_DATA deviceInfoData;
+      deviceInfoData.cbSize = sizeof(SP_DEVINFO_DATA);
+      DWORD deviceIndex = 0;
+      BOOL success = FALSE;
+      while (SetupDiEnumDeviceInfo(deviceInfoSet, deviceIndex, &deviceInfoData)) {
+        deviceIndex++;
+
+        // Get the device description
+        wchar_t deviceDescriptionBuf[MAX_DEVICE_ID_LEN];
+        if (!SetupDiGetDeviceRegistryPropertyW(deviceInfoSet, &deviceInfoData, SPDRP_DEVICEDESC, NULL, (PBYTE)deviceDescriptionBuf, sizeof(deviceDescriptionBuf), NULL)) {
+          continue;
+        }
+
+        // Check if the description matches
+        if (wcscmp(deviceDescriptionBuf, deviceDescription) == 0) {
+          // Get the device instance ID
+          wchar_t deviceInstanceID[MAX_DEVICE_ID_LEN];
+          if (!SetupDiGetDeviceInstanceIdW(deviceInfoSet, &deviceInfoData, deviceInstanceID, sizeof(deviceInstanceID) / sizeof(wchar_t), NULL)) {
+            break;
+          }
+
+          wcsncpy(deviceInstancePath, deviceInstanceID, deviceInstancePathSize);
+          success = TRUE;
+          break;
+        }
+      }
+
+      // Clean up
+      SetupDiDestroyDeviceInfoList(deviceInfoSet);
+
+      return success;
+    }
+
+    /// <summary>
+    /// Jails virtual gamepad devices into the given session.
+    /// </summary>
+    /// <param name="sessionId">Session ID</param>
+    /// <param name="rootDevInst">Bus device</param>
+    /// <returns>Number of jailed devices</returns>
+    SIZE_T JailGamepadDevices(DWORD sessionId, DEVINST rootDevInst)
+    {
+      // We haven't found the CM_Get_DevNode_PropertyW function yet
+      if (CM_Get_DevNode_PropertyW_DynLib == NULL)
+      {
+        // Check if the cfgmgr32.dll module is already loaded
+        HMODULE cfgmgr32 = GetModuleHandleA("cfgmgr32.dll");
+
+        // cfgmgr32.dll hasn't been loaded yet
+        if (cfgmgr32 == NULL)
+        {
+          // Load cfgmgr32.dll
+          cfgmgr32 = LoadLibraryA("cfgmgr32.dll");
+        }
+
+        // Find the CM_Get_DevNode_PropertyW function
+        *(FARPROC*)(&CM_Get_DevNode_PropertyW_DynLib) = GetProcAddress(cfgmgr32, "CM_Get_DevNode_PropertyW");
+      }
+
+      // We haven't found the CM_Set_DevNode_PropertyW function yet
+      if (CM_Set_DevNode_PropertyW_DynLib == NULL)
+      {
+        // Check if the cfgmgr32.dll module is already loaded
+        HMODULE cfgmgr32 = GetModuleHandleA("cfgmgr32.dll");
+
+        // cfgmgr32.dll hasn't been loaded yet
+        if (cfgmgr32 == NULL)
+        {
+          // Load cfgmgr32.dll
+          cfgmgr32 = LoadLibraryA("cfgmgr32.dll");
+        }
+
+        // Find the CM_Set_DevNode_PropertyW function
+        *(FARPROC*)(&CM_Set_DevNode_PropertyW_DynLib) = GetProcAddress(cfgmgr32, "CM_Set_DevNode_PropertyW");
+      }
+
+      // The number of jailed devices
+      SIZE_T jailedDevices = 0;
+
+      // Get the device information set for the specified bus device
+      if (rootDevInst == 0)
+      {
+        // Find the ViGEmBus
+        if (CM_Locate_DevNodeW(&rootDevInst, (DEVINSTID_W)ViGEmBusInstancePath, 0) != CR_SUCCESS)
+        {
+          // Log the warning
+          BOOST_LOG(warning) << "Couldn't find the ViGEmBus";
+
+          // Exit early on error
+          return 0;
+        }
+      }
+
+      // Get the first child device of the bus
+      DEVINST childDevInst;
+      if (CM_Get_Child(&childDevInst, rootDevInst, 0) != CR_SUCCESS)
+      {
+        // This device has no child devices
+        return 0;
+      }
+
+      // Iterate through all child devices
+      DEVINST currentDevInst = childDevInst;
+      do
+      {
+        // Get the device ID
+        wchar_t deviceId[MAX_DEVICE_ID_LEN];
+        if (CM_Get_Device_IDW(currentDevInst, deviceId, sizeof(deviceId) / sizeof(deviceId[0]), 0) == CR_SUCCESS)
+        {
+          // The session ID property key
+          DEVPROPKEY deviceSessionIdKey = DEVPKEY_Device_SessionId;
+
+          // Get the device's current session ID
+          DEVPROPTYPE currentSessionIdPropertyType = DEVPROP_TYPE_EMPTY;
+          BOOL currentSessionIdSet = FALSE;
+          DWORD currentSessionId = 0xffffffff;
+          ULONG currentSessionIdPropertySize = sizeof(currentSessionId);
+          if (CM_Get_DevNode_PropertyW_DynLib(currentDevInst, &deviceSessionIdKey, &currentSessionIdPropertyType, (PBYTE)&currentSessionId, &currentSessionIdPropertySize, 0) == CR_SUCCESS)
+          {
+            // Pass the current session ID to children
+            currentSessionIdSet = TRUE;
+
+            // Log the session ID override
+            BOOST_LOG(debug) << "Device " << std::wstring(deviceId) << " already has its session ID set to " << currentSessionId;
+          }
+          else
+          {
+            // Jail the device into the given session
+            CONFIGRET setPropertyResult = CR_SUCCESS;
+            if ((setPropertyResult = CM_Set_DevNode_PropertyW_DynLib(currentDevInst, &deviceSessionIdKey, DEVPROP_TYPE_UINT32, (const PBYTE)&sessionId, sizeof(sessionId), 0)) == CR_SUCCESS)
+            {
+              // Log the jailed device
+              BOOST_LOG(info) << "Jailed " << std::wstring(deviceId) << " into session " << sessionId;
+
+              // Increment the jailed device counter
+              jailedDevices++;
+            }
+            else
+            {
+              // Log the warning
+              BOOST_LOG(warning) << "Jailing " << std::wstring(deviceId) << " into session " << sessionId << " failed with error code " << setPropertyResult;
+            }
+          }
+
+          // Recurse further down
+          jailedDevices += JailGamepadDevices(currentSessionIdSet ? currentSessionId : sessionId, currentDevInst);
+        }
+
+        // Move to the next sibling
+        if (CM_Get_Sibling(&currentDevInst, currentDevInst, 0) != CR_SUCCESS)
+        {
+          // No more siblings
+          break;
+        }
+      } while (true);
+
+      // Return the number of jailed devices
+      return jailedDevices;
+    }
   public:
     int
     init() {
@@ -207,6 +409,15 @@ namespace platf {
       }
 
       gamepads.resize(MAX_GAMEPADS);
+
+      if (GetDeviceInstancePath(L"Nefarius Virtual Gamepad Emulation Bus", ViGEmBusInstancePath, sizeof(ViGEmBusInstancePath) / sizeof(wchar_t)))
+      {
+        BOOST_LOG(info) << "ViGEmBus device instance path: " << std::wstring(ViGEmBusInstancePath);
+      }
+      else
+      {
+        BOOST_LOG(warning) << "Failed to retrieve the ViGEmBus device instance path";
+      }
 
       return 0;
     }
@@ -261,11 +472,43 @@ namespace platf {
         gamepad.available_pointers = 0x3;
       }
 
-      auto status = vigem_target_add(client.get(), gamepad.gp.get());
+      LARGE_INTEGER frequency;
+      if (!QueryPerformanceFrequency(&frequency))
+      {
+        BOOST_LOG(error) << "Couldn't query the system's performance frequency";
+
+        return -1;
+      }
+
+      auto status = vigem_target_add_async(client.get(), gamepad.gp.get(), EndViGEmAddTarget);
       if (!VIGEM_SUCCESS(status)) {
         BOOST_LOG(error) << "Couldn't add Gamepad to ViGEm connection ["sv << util::hex(status).to_string_view() << ']';
 
         return -1;
+      }
+
+      SIZE_T spawnedVirtualDevices = gp_type == Xbox360Wired ? 3 : 2;
+
+      // Get the instance's current session ID
+      DWORD remoteSessionId = 0xffffffff;
+      ProcessIdToSessionId(GetCurrentProcessId(), &remoteSessionId);
+      if (remoteSessionId != 0xffffffff)
+      {
+        // Start measuring elapsed time
+        LARGE_INTEGER startTime, endTime;
+        QueryPerformanceCounter(&startTime);
+
+        // The previous iteration's number of jailed devices
+        SIZE_T totalJailed = 0;
+
+        do
+        {
+          // Jail the next batch of devices
+          totalJailed += JailGamepadDevices(remoteSessionId, 0);
+
+          // Measure the elapsed time
+          QueryPerformanceCounter(&endTime);
+        } while (totalJailed < spawnedVirtualDevices && (endTime.QuadPart - startTime.QuadPart) < (frequency.QuadPart << 1));
       }
 
       gamepad.feedback_queue = std::move(feedback_queue);

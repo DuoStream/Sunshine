@@ -1183,8 +1183,6 @@ namespace video {
     platf::adjust_thread_priority(platf::thread_priority_e::critical);
 
     while (capture_ctx_queue->running()) {
-      bool artificial_reinit = false;
-
       auto push_captured_image_callback = [&](std::shared_ptr<platf::img_t> &&img, bool frame_captured) -> bool {
         KITTY_WHILE_LOOP(auto capture_ctx = std::begin(capture_ctxs), capture_ctx != std::end(capture_ctxs), {
           if (!capture_ctx->images->running()) {
@@ -1209,7 +1207,6 @@ namespace video {
         }
 
         if (switch_display_event->peek()) {
-          artificial_reinit = true;
           return false;
         }
 
@@ -1217,12 +1214,6 @@ namespace video {
       };
 
       auto status = disp->capture(push_captured_image_callback, pull_free_image_callback, &display_cursor);
-
-      if (artificial_reinit && status != platf::capture_e::error) {
-        status = platf::capture_e::reinit;
-
-        artificial_reinit = false;
-      }
 
       switch (status) {
         case platf::capture_e::reinit: {
