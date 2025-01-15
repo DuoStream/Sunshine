@@ -244,13 +244,13 @@ namespace platf {
    * @return The user's token. If user has admin capability it will be elevated, otherwise it will be a limited token. On error, `nullptr`.
    */
   HANDLE retrieve_users_token(bool elevated) {
-    DWORD consoleSessionId;
+    DWORD consoleSessionId = 0xFFFFFFFF;
     HANDLE userToken;
     TOKEN_ELEVATION_TYPE elevationType;
     DWORD dwSize;
 
     // Get the session ID of the active console session
-    consoleSessionId = WTSGetActiveConsoleSessionId();
+    ProcessIdToSessionId(GetCurrentProcessId(), &consoleSessionId);
     if (0xFFFFFFFF == consoleSessionId) {
       // If there is no active console session, log a warning and return null
       BOOST_LOG(warning) << "There isn't an active user session, therefore it is not possible to execute commands under the users profile.";

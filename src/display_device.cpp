@@ -774,20 +774,8 @@ namespace display_device {
   }
 
   void configure_display(const SingleDisplayConfiguration &config) {
-    std::lock_guard lock {DD_DATA.mutex};
-    if (!DD_DATA.sm_instance) {
-      // Platform is not supported, nothing to do.
-      return;
-    }
-
-    DD_DATA.sm_instance->schedule([config](auto &settings_iface, auto &stop_token) {
-      // We only want to keep retrying in case of a transient errors.
-      // In other cases, when we either fail or succeed we just want to stop...
-      if (settings_iface.applySettings(config) != SettingsManagerInterface::ApplyResult::ApiTemporarilyUnavailable) {
-        stop_token.requestStop();
-      }
-    },
-                                  {.m_sleep_durations = {DEFAULT_RETRY_INTERVAL}});
+    // We can't directly configure the display in remote sessions
+    return;
   }
 
   void revert_configuration() {

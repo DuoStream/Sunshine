@@ -2,36 +2,23 @@
  * @file src/platform/windows/display_base.cpp
  * @brief Definitions for the Windows display base code.
  */
-// standard includes
 #include <cmath>
+#include <initguid.h>
 #include <thread>
 
-// platform includes
-#include <initguid.h>
-
-// lib includes
 #include <boost/algorithm/string/join.hpp>
-#include <boost/process/v1.hpp>
-#include <MinHook.h>
+#include <boost/process.hpp>
+#include <shtypes.h>
+#include <shellscalingapi.h>
+#include <windows.h>
 
-// We have to include boost/process/v1.hpp before display.h due to WinSock.h,
+// We have to include boost/process.hpp before display.h due to WinSock.h,
 // but that prevents the definition of NTSTATUS so we must define it ourself.
 typedef long NTSTATUS;
-
-// Definition from the WDK's d3dkmthk.h
-typedef enum _D3DKMT_GPU_PREFERENCE_QUERY_STATE: DWORD {
-  D3DKMT_GPU_PREFERENCE_STATE_UNINITIALIZED,  ///< The GPU preference isn't initialized.
-  D3DKMT_GPU_PREFERENCE_STATE_HIGH_PERFORMANCE,  ///< The highest performing GPU is preferred.
-  D3DKMT_GPU_PREFERENCE_STATE_MINIMUM_POWER,  ///< The minimum-powered GPU is preferred.
-  D3DKMT_GPU_PREFERENCE_STATE_UNSPECIFIED,  ///< A GPU preference isn't specified.
-  D3DKMT_GPU_PREFERENCE_STATE_NOT_FOUND,  ///< A GPU preference isn't found.
-  D3DKMT_GPU_PREFERENCE_STATE_USER_SPECIFIED_GPU  ///< A specific GPU is preferred.
-} D3DKMT_GPU_PREFERENCE_QUERY_STATE;
 
 #include "display.h"
 #include "misc.h"
 #include "src/config.h"
-#include "src/display_device.h"
 #include "src/logging.h"
 #include "src/platform/common.h"
 #include "src/video.h"
@@ -39,169 +26,312 @@ typedef enum _D3DKMT_GPU_PREFERENCE_QUERY_STATE: DWORD {
 namespace platf {
   using namespace std::literals;
 }
-
 namespace platf::dxgi {
   namespace bp = boost::process;
 
-  /**
-   * DDAPI-specific initialization goes here.
-   */
-  int duplication_t::init(display_base_t *display, const ::video::config_t &config) {
-    HRESULT status;
-
-    // Capture format will be determined from the first call to AcquireNextFrame()
-    display->capture_format = DXGI_FORMAT_UNKNOWN;
-
-    // FIXME: Duplicate output on RX580 in combination with DOOM (2016) --> BSOD
+  float GetPrimaryMonitorScale(PRECT desktopRectangle)
+  {
+    float scale = 1.0f;
+    const POINT ptZero = { 0, 0 };
+    HMONITOR monitor = MonitorFromPoint(ptZero, MONITOR_DEFAULTTOPRIMARY);
+    if (monitor != NULL)
     {
-      // IDXGIOutput5 is optional, but can provide improved performance and wide color support
-      dxgi::output5_t output5 {};
-      status = display->output->QueryInterface(IID_IDXGIOutput5, (void **) &output5);
-      if (SUCCEEDED(status)) {
-        // Ask the display implementation which formats it supports
-        auto supported_formats = display->get_supported_capture_formats();
-        if (supported_formats.empty()) {
-          BOOST_LOG(warning) << "No compatible capture formats for this encoder"sv;
-          return -1;
+      MONITORINFOEX monitorInfo = {0};
+      monitorInfo.cbSize = sizeof(monitorInfo);
+      if (GetMonitorInfoA(monitor, (LPMONITORINFO)&monitorInfo))
+      {
+        DEVMODE deviceInfo = {0};
+        deviceInfo.dmSize = sizeof(deviceInfo);
+        if (EnumDisplaySettingsA(monitorInfo.szDevice, ENUM_CURRENT_SETTINGS, &deviceInfo))
+        {
+          scale = (float)deviceInfo.dmPelsWidth / (float)(desktopRectangle->right - desktopRectangle->left);
+          float value = (int)(scale * 100 + .5);
+          scale = (float)value / 100;
         }
+      }
+    }
+    return scale;
+  }
 
-        // We try this twice, in case we still get an error on reinitialization
-        for (int x = 0; x < 2; ++x) {
-          // Ensure we can duplicate the current display
-          syncThreadDesktop();
+  void duplication_t::map_shared_buffer(ID3D11Device* baseDevice) {
+    // We haven't opened the shared buffer handle yet
+    if (sharedBufferHandle == NULL)
+    {
+      // Open the shared buffer handle
+      DWORD sessionId = 0;
+      ProcessIdToSessionId(GetCurrentProcessId(), &sessionId);
+      char sharedBufferName[32];
+      sprintf(sharedBufferName, "Global\\DuoIdd%u", (unsigned int)sessionId);
+      sharedBufferHandle = OpenFileMappingA(FILE_MAP_ALL_ACCESS, FALSE, sharedBufferName);
 
-          status = output5->DuplicateOutput1((IUnknown *) display->device.get(), 0, supported_formats.size(), supported_formats.data(), &dup);
-          if (SUCCEEDED(status)) {
-            break;
+      // We managed to open the shared buffer handle
+      if (sharedBufferHandle != NULL)
+      {
+        // Map the shared buffer
+        sharedBuffer = (PRdpIddCaptureBuffer)MapViewOfFile(sharedBufferHandle, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(RdpIddCaptureBuffer));
+      }
+    }
+
+    // We need to re-duplicate the shared framebuffer handle
+    if (sharedBuffer != NULL && sharedBuffer->WUDFHostProcessId != 0 && sharedBuffer->WUDFHostFrameBufferHandle != wudfFrameBufferHandle && frameBufferHandle != NULL)
+    {
+      // Close the previous shared framebuffer handle
+      CloseHandle(frameBufferHandle);
+
+      // Reset the handle
+      frameBufferHandle = NULL;
+    }
+
+    // It's time to open the shared framebuffer texture
+    if (sharedBuffer != NULL && sharedBuffer->WUDFHostProcessId != 0 && sharedBuffer->WUDFHostFrameBufferHandle != NULL && frameBufferHandle == NULL)
+    {
+      // Open the wudfhost.exe process
+      HANDLE wudfHostProcess = OpenProcess(PROCESS_ALL_ACCESS, FALSE, sharedBuffer->WUDFHostProcessId);
+      if (wudfHostProcess != NULL)
+      {
+        // Open a true handle to this sunshine.exe process
+        HANDLE sunshineProcess = OpenProcess(PROCESS_ALL_ACCESS, FALSE, GetCurrentProcessId());
+        if (sunshineProcess != NULL)
+        {
+          // Keep track of the wudfhost.exe-sided handle
+          wudfFrameBufferHandle = sharedBuffer->WUDFHostFrameBufferHandle;
+
+          // Duplicate the handle into the sunshine process
+          if (DuplicateHandle(wudfHostProcess, wudfFrameBufferHandle, sunshineProcess, &frameBufferHandle, 0, FALSE, DUPLICATE_SAME_ACCESS))
+          {
+            // We have an existing framebuffer texture we need to release
+            if (frameBufferTexture != NULL)
+            {
+              // Release the framebuffer texture
+              frameBufferTexture->Release();
+
+              // And NULL its reference
+              frameBufferTexture = NULL;
+            }
           }
-          std::this_thread::sleep_for(200ms);
+
+          // Close the sunshine.exe process handle
+          CloseHandle(sunshineProcess);
         }
 
-        // We don't retry with DuplicateOutput() because we can hit this codepath when we're racing
-        // with mode changes and we don't want to accidentally fall back to suboptimal capture if
-        // we get unlucky and succeed below.
-        if (FAILED(status)) {
-          BOOST_LOG(warning) << "DuplicateOutput1 Failed [0x"sv << util::hex(status).to_string_view() << ']';
-          return -1;
-        }
-      } else {
-        BOOST_LOG(warning) << "IDXGIOutput5 is not supported by your OS. Capture performance may be reduced."sv;
+        // Close the wudfhost.exe process handle
+        CloseHandle(wudfHostProcess);
+      }
+    }
 
-        dxgi::output1_t output1 {};
-        status = display->output->QueryInterface(IID_IDXGIOutput1, (void **) &output1);
-        if (FAILED(status)) {
-          BOOST_LOG(error) << "Failed to query IDXGIOutput1 from the output"sv;
-          return -1;
-        }
+    // We can and need to re-open the shared texture
+    if ((frameBufferTexture == NULL || baseDevice != frameReaderDevice) && frameBufferHandle != NULL)
+    {
+      // Reset the object
+      reset();
 
-        for (int x = 0; x < 2; ++x) {
-          // Ensure we can duplicate the current display
-          syncThreadDesktop();
+      // Keep track of the current base device
+      frameReaderDevice = baseDevice;
 
-          status = output1->DuplicateOutput((IUnknown *) display->device.get(), &dup);
-          if (SUCCEEDED(status)) {
-            break;
+      // Query the ID3D11Device1 interface we need to open shared resources
+      ID3D11Device1* d3d11Device1 = NULL;
+      if (SUCCEEDED(frameReaderDevice->QueryInterface(&d3d11Device1)))
+      {
+        // Open the shared framebuffer texture
+        d3d11Device1->OpenSharedResource1(frameBufferHandle, __uuidof(ID3D11Texture2D), (void**)&frameBufferTexture);
+
+        // Release the D3D11Device1 interface
+        d3d11Device1->Release();
+      }
+    }
+  }
+
+  capture_e duplication_t::iddblt(ID3D11Device* baseDevice, ID3D11Resource** texture)
+  {
+    // The capture result
+    capture_e result = capture_e::timeout;
+
+    // The frame ready event hasn't been opened yet
+    if (frameReadyEventHandle == NULL)
+    {
+      // Open the frame ready event
+      DWORD sessionId = 0;
+      ProcessIdToSessionId(GetCurrentProcessId(), &sessionId);
+      char frameReadyEventName[32];
+      sprintf(frameReadyEventName, "Global\\DuoIdd%uFrameReady", (unsigned int)sessionId);
+      frameReadyEventHandle = OpenEventA(EVENT_ALL_ACCESS, FALSE, frameReadyEventName);
+    }
+
+    // The frame producer is ready
+    if (frameReadyEventHandle != NULL)
+    {
+      // Wait for the next frame
+      if (WaitForSingleObject(frameReadyEventHandle, 100) == WAIT_OBJECT_0)
+      {
+        // Map the shared buffer
+        map_shared_buffer(baseDevice);
+
+        // We have a new frame to return
+        if (baseDevice == frameReaderDevice && sharedBuffer != NULL && sharedBuffer->CapturedFrames != encodedFrames && frameBufferTexture != NULL)
+        {
+          // Read the number of captured frames
+          SIZE_T capturedFrames = sharedBuffer->CapturedFrames;
+
+          // Set the internal encoded frame count
+          encodedFrames = capturedFrames;
+
+          // We need to adjust the mode
+          if (sharedBuffer->Mode.Width != mode.Width || sharedBuffer->Mode.Height != mode.Height || sharedBuffer->Mode.RefreshRate != mode.RefreshRate || (sharedBuffer->Mode.IsHDRSupported && sharedBuffer->Mode.HDR != mode.HDR))
+          {
+            // Log the wanted mode
+            BOOST_LOG(info) << "Changing the display mode to " << mode.Width << "x" << mode.Height << "@" << mode.RefreshRate << " using the " << (sharedBuffer->Mode.IsHDRSupported && mode.HDR ? "HDR" : "SDR") << " colorspace";
+
+            // Copy over the parameters
+            sharedBuffer->Mode.Width = mode.Width;
+            sharedBuffer->Mode.Height = mode.Height;
+            sharedBuffer->Mode.RefreshRate = mode.RefreshRate;
+            sharedBuffer->Mode.HDR = sharedBuffer->Mode.IsHDRSupported && mode.HDR;
+
+            // Request a mode change
+            sharedBuffer->ModeChangePending = TRUE;
           }
-          std::this_thread::sleep_for(200ms);
-        }
 
-        if (FAILED(status)) {
-          BOOST_LOG(error) << "DuplicateOutput Failed [0x"sv << util::hex(status).to_string_view() << ']';
-          return -1;
+          // Get the texture description
+          D3D11_TEXTURE2D_DESC desc;
+          frameBufferTexture->GetDesc(&desc);
+
+          // The desktop resolution or bit-depth changed
+          if (frameBufferTextureDescription.Format != DXGI_FORMAT_UNKNOWN && (frameBufferTextureDescription.Width != desc.Width || frameBufferTextureDescription.Height != desc.Height || frameBufferTextureDescription.Format != desc.Format))
+          {
+            // Log the format change
+            BOOST_LOG(info) << "Switching stream resolution to " << desc.Width << "x" << desc.Height << " (Format: " << desc.Format << ")";
+
+            // We aren't encoding this frame
+            resumeSwapChain();
+
+            // Re-initialize the capture
+            result = capture_e::reinit;
+          }
+
+          // The desktop hasn't changed
+          else
+          {
+            // Return the shared texture
+            *texture = (ID3D11Resource*)frameBufferTexture;
+
+            // And let the caller know he can access it
+            result = capture_e::ok;
+          }
+
+          // Keep track of the texture description
+          frameBufferTextureDescription = desc;
         }
       }
     }
 
-    DXGI_OUTDUPL_DESC dup_desc;
-    dup->GetDesc(&dup_desc);
-
-    BOOST_LOG(info) << "Desktop resolution ["sv << dup_desc.ModeDesc.Width << 'x' << dup_desc.ModeDesc.Height << ']';
-    BOOST_LOG(info) << "Desktop format ["sv << display->dxgi_format_to_string(dup_desc.ModeDesc.Format) << ']';
-
-    display->display_refresh_rate = dup_desc.ModeDesc.RefreshRate;
-    double display_refresh_rate_decimal = (double) display->display_refresh_rate.Numerator / display->display_refresh_rate.Denominator;
-    BOOST_LOG(info) << "Display refresh rate [" << display_refresh_rate_decimal << "Hz]";
-    BOOST_LOG(info) << "Requested frame rate [" << display->client_frame_rate << "fps]";
-    display->display_refresh_rate_rounded = lround(display_refresh_rate_decimal);
-    return 0;
+    // Return the capture result
+    return result;
   }
 
-  capture_e duplication_t::next_frame(DXGI_OUTDUPL_FRAME_INFO &frame_info, std::chrono::milliseconds timeout, resource_t::pointer *res_p) {
-    auto capture_status = release_frame();
-    if (capture_status != capture_e::ok) {
-      return capture_status;
-    }
-
-    auto status = dup->AcquireNextFrame(timeout.count(), &frame_info, res_p);
-
-    switch (status) {
-      case S_OK:
-        // ProtectedContentMaskedOut seems to semi-randomly be TRUE or FALSE even when protected content
-        // is on screen the whole time, so we can't just print when it changes. Instead we'll keep track
-        // of the last time we printed the warning and print another if we haven't printed one recently.
-        if (frame_info.ProtectedContentMaskedOut && std::chrono::steady_clock::now() > last_protected_content_warning_time + 10s) {
-          BOOST_LOG(warning) << "Windows is currently blocking DRM-protected content from capture. You may see black regions where this content would be."sv;
-          last_protected_content_warning_time = std::chrono::steady_clock::now();
-        }
-
-        has_frame = true;
-        return capture_e::ok;
-      case DXGI_ERROR_WAIT_TIMEOUT:
-        return capture_e::timeout;
-      case WAIT_ABANDONED:
-      case DXGI_ERROR_ACCESS_LOST:
-      case DXGI_ERROR_ACCESS_DENIED:
-        return capture_e::reinit;
-      default:
-        BOOST_LOG(error) << "Couldn't acquire next frame [0x"sv << util::hex(status).to_string_view();
-        return capture_e::error;
+  void duplication_t::resumeSwapChain()
+  {
+    // We have access to the shared buffer
+    if (sharedBuffer != NULL)
+    {
+      // Let the driver know how far along we are with processing
+      sharedBuffer->EncodedFrames = encodedFrames;
     }
   }
 
-  capture_e duplication_t::reset(dup_t::pointer dup_p) {
-    auto capture_status = release_frame();
+  bool duplication_t::test(IDXGIAdapter1* baseAdapter1)
+  {
+    // The test result
+    bool result = false;
 
-    dup.reset(dup_p);
+    // Query the IDXGIAdapter interface
+    IDXGIAdapter* baseAdapter = NULL;
+    if (SUCCEEDED(baseAdapter1->QueryInterface(IID_IDXGIAdapter, (void **)&baseAdapter)))
+    {
+      // The accepted feature levels
+      D3D_FEATURE_LEVEL featureLevels[] {
+        D3D_FEATURE_LEVEL_11_1,
+        D3D_FEATURE_LEVEL_11_0,
+        D3D_FEATURE_LEVEL_10_1,
+        D3D_FEATURE_LEVEL_10_0,
+        D3D_FEATURE_LEVEL_9_3,
+        D3D_FEATURE_LEVEL_9_2,
+        D3D_FEATURE_LEVEL_9_1
+      };
 
-    return capture_status;
-  }
+      // Create a temporary ID3D11Device
+      ID3D11Device* baseDevice = nullptr;
+      if (SUCCEEDED(D3D11CreateDevice(baseAdapter, D3D_DRIVER_TYPE_UNKNOWN, nullptr, D3D11_CREATE_DEVICE_FLAGS, featureLevels, sizeof(featureLevels) / sizeof(D3D_FEATURE_LEVEL), D3D11_SDK_VERSION, &baseDevice, nullptr, nullptr)))
+      {
+        // Test the ID3D11Device
+        result = test(baseDevice);
 
-  capture_e duplication_t::release_frame() {
-    if (!has_frame) {
-      return capture_e::ok;
+        // Release the ID3D11Device
+        baseDevice->Release();
+
+        // And NULL its reference
+        baseDevice = NULL;
+      }
+
+      // Release the IDXGIAdapter interface
+      baseAdapter->Release();
+
+      // And NULL its reference
+      baseAdapter = NULL;
     }
 
-    auto status = dup->ReleaseFrame();
-    has_frame = false;
-    switch (status) {
-      case S_OK:
-        return capture_e::ok;
+    // Return the result
+    return result;
+  }
 
-      case DXGI_ERROR_INVALID_CALL:
-        BOOST_LOG(warning) << "Duplication frame already released";
-        return capture_e::ok;
+  bool duplication_t::test(ID3D11Device* baseDevice)
+  {
+    // Reset the object
+    reset();
 
-      case DXGI_ERROR_ACCESS_LOST:
-        return capture_e::reinit;
+    // Map the shared buffer
+    map_shared_buffer(baseDevice);
 
-      default:
-        BOOST_LOG(error) << "Error while releasing duplication frame [0x"sv << util::hex(status).to_string_view();
-        return capture_e::error;
+    // Check if the ID3D11Device passed the capture test
+    bool result = baseDevice == frameReaderDevice && sharedBuffer != NULL && frameBufferTexture != NULL;
+
+    // Return the test result
+    return result;
+  }
+
+  void duplication_t::reset() {
+    // We're holding onto a shared texture
+    if (frameBufferTexture != NULL)
+    {
+      // Release the texture
+      frameBufferTexture->Release();
+
+      // And NULL its reference
+      frameBufferTexture = NULL;
     }
   }
 
-  duplication_t::~duplication_t() {
-    release_frame();
+  void duplication_t::changeMode(const ::video::config_t &config)
+  {
+    // Log the call
+    BOOST_LOG(info) << "Requesting mode change to " << config.width << "x" << config.height << "@" << config.framerate << " using the " << (config.dynamicRange != 0 ? "HDR" : "SDR") << " colorspace";
+
+    // Set the mode parameters
+    mode.Width = config.width;
+    mode.Height = config.height;
+    mode.RefreshRate = config.framerate;
+    mode.HDR = config.dynamicRange != 0;
   }
 
-  capture_e display_base_t::capture(const push_captured_image_cb_t &push_captured_image_cb, const pull_free_image_cb_t &pull_free_image_cb, bool *cursor) {
+  capture_e
+  display_base_t::capture(const push_captured_image_cb_t &push_captured_image_cb, const pull_free_image_cb_t &pull_free_image_cb, bool *cursor) {
     auto adjust_client_frame_rate = [&]() -> DXGI_RATIONAL {
       // Adjust capture frame interval when display refresh rate is not integral but very close to requested fps.
       if (display_refresh_rate.Denominator > 1) {
         DXGI_RATIONAL candidate = display_refresh_rate;
         if (client_frame_rate % display_refresh_rate_rounded == 0) {
           candidate.Numerator *= client_frame_rate / display_refresh_rate_rounded;
-        } else if (display_refresh_rate_rounded % client_frame_rate == 0) {
+        }
+        else if (display_refresh_rate_rounded % client_frame_rate == 0) {
           candidate.Denominator *= display_refresh_rate_rounded / client_frame_rate;
         }
         double candidate_rate = (double) candidate.Numerator / candidate.Denominator;
@@ -212,7 +342,7 @@ namespace platf::dxgi {
         }
       }
 
-      return {(uint32_t) client_frame_rate, 1};
+      return { (uint32_t) client_frame_rate, 1 };
     };
 
     DXGI_RATIONAL client_frame_rate_adjusted = adjust_client_frame_rate();
@@ -255,7 +385,8 @@ namespace platf::dxgi {
           frame_pacing_group_start = std::nullopt;
           frame_pacing_group_frames = 0;
           status = capture_e::timeout;
-        } else {
+        }
+        else {
           timer->sleep_for(sleep_period);
           sleep_overshoot_logger.first_point(sleep_target);
           sleep_overshoot_logger.second_point_now_and_log();
@@ -264,7 +395,8 @@ namespace platf::dxgi {
 
           if (status == capture_e::ok && img_out) {
             frame_pacing_group_frames += 1;
-          } else {
+          }
+          else {
             frame_pacing_group_start = std::nullopt;
             frame_pacing_group_frames = 0;
           }
@@ -273,7 +405,7 @@ namespace platf::dxgi {
 
       // Start new frame pacing group if necessary, snapshot() is called with non-zero timeout
       if (status == capture_e::timeout || (status == capture_e::ok && !frame_pacing_group_start)) {
-        status = snapshot(pull_free_image_cb, img_out, 200ms, *cursor);
+        status = snapshot(pull_free_image_cb, img_out, 1000ms, *cursor);
 
         if (status == capture_e::ok && img_out) {
           frame_pacing_group_start = img_out->frame_timestamp;
@@ -284,25 +416,6 @@ namespace platf::dxgi {
           }
 
           frame_pacing_group_frames = 1;
-        } else if (status == platf::capture_e::timeout) {
-          // The D3D11 device is protected by an unfair lock that is held the entire time that
-          // IDXGIOutputDuplication::AcquireNextFrame() is running. This is normally harmless,
-          // however sometimes the encoding thread needs to interact with our ID3D11Device to
-          // create dummy images or initialize the shared state that is used to pass textures
-          // between the capture and encoding ID3D11Devices.
-          //
-          // When we're in a state where we're not actively receiving frames regularly, we will
-          // spend almost 100% of our time in AcquireNextFrame() holding that critical lock.
-          // Worse still, since it's unfair, we can monopolize it while the encoding thread
-          // is starved. The encoding thread may acquire it for a few moments across a few
-          // ID3D11Device calls before losing it again to us for another long time waiting in
-          // AcquireNextFrame(). The starvation caused by this lock contention causes encoder
-          // reinitialization to take several seconds instead of a fraction of a second.
-          //
-          // To avoid starving the encoding thread, sleep without the lock held for a little
-          // while each time we reach our max frame timeout. This will only happen when nothing
-          // is updating the display, so no visible stutter should be introduced by the sleep.
-          std::this_thread::sleep_for(10ms);
         }
       }
 
@@ -325,108 +438,98 @@ namespace platf::dxgi {
           BOOST_LOG(error) << "Unrecognized capture status ["sv << (int) status << ']';
           return status;
       }
-
-      status = release_snapshot();
-      if (status != platf::capture_e::ok) {
-        return status;
-      }
     }
 
     return capture_e::ok;
   }
 
-  /**
-   * @brief Tests to determine if the Desktop Duplication API can capture the given output.
-   * @details When testing for enumeration only, we avoid resyncing the thread desktop.
-   * @param adapter The DXGI adapter to use for capture.
-   * @param output The DXGI output to capture.
-   * @param enumeration_only Specifies whether this test is occurring for display enumeration.
-   */
-  bool test_dxgi_duplication(adapter_t &adapter, output_t &output, bool enumeration_only) {
-    D3D_FEATURE_LEVEL featureLevels[] {
-      D3D_FEATURE_LEVEL_11_1,
-      D3D_FEATURE_LEVEL_11_0,
-      D3D_FEATURE_LEVEL_10_1,
-      D3D_FEATURE_LEVEL_10_0,
-      D3D_FEATURE_LEVEL_9_3,
-      D3D_FEATURE_LEVEL_9_2,
-      D3D_FEATURE_LEVEL_9_1
-    };
+  bool
+  set_gpu_preference_on_self(int preference) {
+    // The GPU preferences key uses app path as the value name.
+    WCHAR sunshine_path[MAX_PATH];
+    GetModuleFileNameW(NULL, sunshine_path, ARRAYSIZE(sunshine_path));
 
-    device_t device;
-    auto status = D3D11CreateDevice(
-      adapter.get(),
-      D3D_DRIVER_TYPE_UNKNOWN,
-      nullptr,
-      D3D11_CREATE_DEVICE_FLAGS,
-      featureLevels,
-      sizeof(featureLevels) / sizeof(D3D_FEATURE_LEVEL),
-      D3D11_SDK_VERSION,
-      &device,
-      nullptr,
-      nullptr
-    );
-    if (FAILED(status)) {
-      BOOST_LOG(error) << "Failed to create D3D11 device for DD test [0x"sv << util::hex(status).to_string_view() << ']';
+    WCHAR value_data[128];
+    swprintf_s(value_data, L"GpuPreference=%d;", preference);
+
+    auto status = RegSetKeyValueW(HKEY_CURRENT_USER,
+      L"Software\\Microsoft\\DirectX\\UserGpuPreferences",
+      sunshine_path,
+      REG_SZ,
+      value_data,
+      (wcslen(value_data) + 1) * sizeof(WCHAR));
+    if (status != ERROR_SUCCESS) {
+      BOOST_LOG(error) << "Failed to set GPU preference: "sv << status;
       return false;
     }
 
-    output1_t output1;
-    status = output->QueryInterface(IID_IDXGIOutput1, (void **) &output1);
-    if (FAILED(status)) {
-      BOOST_LOG(error) << "Failed to query IDXGIOutput1 from the output"sv;
-      return false;
+    BOOST_LOG(info) << "Set GPU preference: "sv << preference;
+    return true;
+  }
+
+  bool
+  validate_and_test_gpu_preference(const std::string &display_name, bool verify_frame_capture) {
+    std::string cmd = "tools\\ddprobe.exe";
+
+    // We start at 1 because 0 is automatic selection which can be overridden by
+    // the GPU driver control panel options. Since ddprobe.exe can have different
+    // GPU driver overrides than Sunshine.exe, we want to avoid a scenario where
+    // autoselection might work for ddprobe.exe but not for us.
+    for (int i = 1; i < 5; i++) {
+      // Run the probe tool. It returns the status of DuplicateOutput().
+      //
+      // Arg format: [GPU preference] [Display name] [--verify-frame-capture]
+      HRESULT result;
+      std::vector<std::string> args = { std::to_string(i), display_name };
+      try {
+        if (verify_frame_capture) {
+          args.emplace_back("--verify-frame-capture");
+        }
+        result = bp::system(cmd, bp::args(args), bp::std_out > bp::null, bp::std_err > bp::null);
+      }
+      catch (bp::process_error &e) {
+        BOOST_LOG(error) << "Failed to start ddprobe.exe: "sv << e.what();
+        return false;
+      }
+
+      BOOST_LOG(info) << "ddprobe.exe " << boost::algorithm::join(args, " ") << " returned 0x"
+                      << util::hex(result).to_string_view();
+
+      // E_ACCESSDENIED can happen at the login screen. If we get this error,
+      // we know capture would have been supported, because DXGI_ERROR_UNSUPPORTED
+      // would have been raised first if it wasn't.
+      if (result == S_OK || result == E_ACCESSDENIED) {
+        // We found a working GPU preference, so set ourselves to use that.
+        if (set_gpu_preference_on_self(i)) {
+          return true;
+        }
+        else {
+          return false;
+        }
+      }
     }
 
-    // Check if we can use the Desktop Duplication API on this output
-    for (int x = 0; x < 2; ++x) {
-      dup_t dup;
-
-      // Only resynchronize the thread desktop when not enumerating displays.
-      // During enumeration, the caller will do this only once to ensure
-      // a consistent view of available outputs.
-      if (!enumeration_only) {
-        syncThreadDesktop();
-      }
-
-      status = output1->DuplicateOutput((IUnknown *) device.get(), &dup);
-      if (SUCCEEDED(status)) {
-        return true;
-      }
-
-      // If we're not resyncing the thread desktop and we don't have permission to
-      // capture the current desktop, just bail immediately. Retrying won't help.
-      if (enumeration_only && status == E_ACCESSDENIED) {
-        break;
-      } else {
-        std::this_thread::sleep_for(200ms);
-      }
-    }
-
-    BOOST_LOG(error) << "DuplicateOutput() test failed [0x"sv << util::hex(status).to_string_view() << ']';
+    // If no valid configuration was found, return false
     return false;
   }
 
-  /**
-   * @brief Hook for NtGdiDdDDIGetCachedHybridQueryValue() from win32u.dll.
-   * @param gpuPreference A pointer to the location where the preference will be written.
-   * @return Always STATUS_SUCCESS if valid arguments are provided.
-   */
-  NTSTATUS __stdcall NtGdiDdDDIGetCachedHybridQueryValueHook(D3DKMT_GPU_PREFERENCE_QUERY_STATE *gpuPreference) {
-    // By faking a cached GPU preference state of D3DKMT_GPU_PREFERENCE_STATE_UNSPECIFIED, this will
-    // prevent DXGI from performing the normal GPU preference resolution that looks at the registry,
-    // power settings, and the hybrid adapter DDI interface to pick a GPU. Instead, we will not be
-    // bound to any specific GPU. This will prevent DXGI from performing output reparenting (moving
-    // outputs from their true location to the render GPU), which breaks DDA.
-    if (gpuPreference) {
-      *gpuPreference = D3DKMT_GPU_PREFERENCE_STATE_UNSPECIFIED;
-      return 0;  // STATUS_SUCCESS
-    } else {
-      return STATUS_INVALID_PARAMETER;
-    }
+  int
+  GetPrimaryMonitorRefreshRate(int defaultValue) {
+    // Get the primary monitor's device context
+    HDC hdc = GetDC(NULL);
+
+    // Get the refresh rate
+    int refreshRate = GetDeviceCaps(hdc, VREFRESH);
+
+    // Release the device context
+    ReleaseDC(NULL, hdc);
+
+    // Return the refresh rate
+    return refreshRate;
   }
 
-  int display_base_t::init(const ::video::config_t &config, const std::string &display_name) {
+  int
+  display_base_t::init(const ::video::config_t &config, const std::string &display_name) {
     std::once_flag windows_cpp_once_flag;
 
     std::call_once(windows_cpp_once_flag, []() {
@@ -434,22 +537,13 @@ namespace platf::dxgi {
 
       typedef BOOL (*User32_SetProcessDpiAwarenessContext)(DPI_AWARENESS_CONTEXT value);
 
-      {
-        auto user32 = LoadLibraryA("user32.dll");
-        auto f = (User32_SetProcessDpiAwarenessContext) GetProcAddress(user32, "SetProcessDpiAwarenessContext");
-        if (f) {
-          f(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
-        }
-
-        FreeLibrary(user32);
+      auto user32 = LoadLibraryA("user32.dll");
+      auto f = (User32_SetProcessDpiAwarenessContext) GetProcAddress(user32, "SetProcessDpiAwarenessContext");
+      if (f) {
+        f(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
       }
 
-      {
-        // We aren't calling MH_Uninitialize(), but that's okay because this hook lasts for the life of the process
-        MH_Initialize();
-        MH_CreateHookApi(L"win32u.dll", "NtGdiDdDDIGetCachedHybridQueryValue", (void *) NtGdiDdDDIGetCachedHybridQueryValueHook, nullptr);
-        MH_EnableHook(MH_ALL_HOOKS);
-      }
+      FreeLibrary(user32);
     });
 
     // Get rectangle of full desktop for absolute mouse coordinates
@@ -464,46 +558,36 @@ namespace platf::dxgi {
       return -1;
     }
 
-    auto adapter_name = from_utf8(config::video.adapter_name);
-    auto output_name = from_utf8(display_name);
-
     adapter_t::pointer adapter_p;
     for (int tries = 0; tries < 2; ++tries) {
       for (int x = 0; factory->EnumAdapters1(x, &adapter_p) != DXGI_ERROR_NOT_FOUND; ++x) {
-        dxgi::adapter_t adapter_tmp {adapter_p};
-
+        dxgi::adapter_t adapter_tmp { adapter_p };
         DXGI_ADAPTER_DESC1 adapter_desc;
         adapter_tmp->GetDesc1(&adapter_desc);
 
-        if (!adapter_name.empty() && adapter_desc.Description != adapter_name) {
-          continue;
-        }
-
         dxgi::output_t::pointer output_p;
         for (int y = 0; adapter_tmp->EnumOutputs(y, &output_p) != DXGI_ERROR_NOT_FOUND; ++y) {
-          dxgi::output_t output_tmp {output_p};
+          dxgi::output_t output_tmp { output_p };
 
           DXGI_OUTPUT_DESC desc;
           output_tmp->GetDesc(&desc);
 
-          if (!output_name.empty() && desc.DeviceName != output_name) {
-            continue;
-          }
-
-          if (desc.AttachedToDesktop && test_dxgi_duplication(adapter_tmp, output_tmp, false)) {
+          if (desc.AttachedToDesktop) {
             output = std::move(output_tmp);
 
             offset_x = desc.DesktopCoordinates.left;
             offset_y = desc.DesktopCoordinates.top;
-            width = desc.DesktopCoordinates.right - offset_x;
-            height = desc.DesktopCoordinates.bottom - offset_y;
+            float scale = GetPrimaryMonitorScale(&desc.DesktopCoordinates);
+            width = (desc.DesktopCoordinates.right - offset_x) * scale;
+            height = (desc.DesktopCoordinates.bottom - offset_y) * scale;
 
             display_rotation = desc.Rotation;
             if (display_rotation == DXGI_MODE_ROTATION_ROTATE90 ||
                 display_rotation == DXGI_MODE_ROTATION_ROTATE270) {
               width_before_rotation = height;
               height_before_rotation = width;
-            } else {
+            }
+            else {
               width_before_rotation = width;
               height_before_rotation = height;
             }
@@ -517,25 +601,33 @@ namespace platf::dxgi {
           }
         }
 
-        if (output) {
+        if (dup.test(adapter_p)) {
           adapter = std::move(adapter_tmp);
+        }
+
+        if (output && adapter) {
           break;
         }
       }
 
-      if (output) {
+      if (output && adapter) {
         break;
       }
 
       // If we made it here without finding an output, try to power on the display and retry.
       if (tries == 0) {
         SetThreadExecutionState(ES_DISPLAY_REQUIRED);
-        Sleep(500);
+        Sleep(5000);
       }
     }
 
+    if (!adapter) {
+      BOOST_LOG(error) << "Failed to locate an adapter, restarting sunshine"sv;
+      return -1;
+    }
+
     if (!output) {
-      BOOST_LOG(error) << "Failed to locate an output device"sv;
+      BOOST_LOG(error) << "Failed to locate an output device, restarting sunshine"sv;
       return -1;
     }
 
@@ -555,23 +647,29 @@ namespace platf::dxgi {
       return -1;
     }
 
+    int d3d11createdevice_retry_count = 10;
+    retry_d3d11createdevice:
     status = D3D11CreateDevice(
       adapter_p,
       D3D_DRIVER_TYPE_UNKNOWN,
       nullptr,
       D3D11_CREATE_DEVICE_FLAGS,
-      featureLevels,
-      sizeof(featureLevels) / sizeof(D3D_FEATURE_LEVEL),
+      featureLevels, sizeof(featureLevels) / sizeof(D3D_FEATURE_LEVEL),
       D3D11_SDK_VERSION,
       &device,
       &feature_level,
-      &device_ctx
-    );
+      &device_ctx);
 
     adapter_p->Release();
 
     if (FAILED(status)) {
       BOOST_LOG(error) << "Failed to create D3D11 device [0x"sv << util::hex(status).to_string_view() << ']';
+
+      if (status == E_OUTOFMEMORY && d3d11createdevice_retry_count > 0) {
+        d3d11createdevice_retry_count--;
+        Sleep(50);
+        goto retry_d3d11createdevice;
+      }
 
       return -1;
     }
@@ -601,12 +699,12 @@ namespace platf::dxgi {
       LUID val;
 
       if (OpenProcessToken(GetCurrentProcess(), flags, &token) &&
-          !!LookupPrivilegeValue(nullptr, SE_INC_BASE_PRIORITY_NAME, &val)) {
+          !!LookupPrivilegeValue(NULL, SE_INC_BASE_PRIORITY_NAME, &val)) {
         tp.PrivilegeCount = 1;
         tp.Privileges[0].Luid = val;
         tp.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
 
-        if (!AdjustTokenPrivileges(token, false, &tp, sizeof(tp), nullptr, nullptr)) {
+        if (!AdjustTokenPrivileges(token, false, &tp, sizeof(tp), NULL, NULL)) {
           BOOST_LOG(warning) << "Could not set privilege to increase GPU priority";
         }
       }
@@ -624,7 +722,7 @@ namespace platf::dxgi {
             return false;
           }
 
-          D3DKMT_OPENADAPTERFROMLUID d3dkmt_adapter = {adapter};
+          D3DKMT_OPENADAPTERFROMLUID d3dkmt_adapter = { adapter };
           if (FAILED(d3dkmt_open_adapter(&d3dkmt_adapter))) {
             BOOST_LOG(error) << "D3DKMTOpenAdapterFromLuid() failed while trying to determine GPU HAGS status";
             return false;
@@ -641,12 +739,13 @@ namespace platf::dxgi {
 
           if (SUCCEEDED(d3dkmt_query_adapter_info(&d3dkmt_adapter_info))) {
             result = d3dkmt_adapter_caps.HwSchEnabled;
-          } else {
+          }
+          else {
             BOOST_LOG(warning) << "D3DKMTQueryAdapterInfo() failed while trying to determine GPU HAGS status";
             result = false;
           }
 
-          D3DKMT_CLOSEADAPTER d3dkmt_close_adapter_wrap = {d3dkmt_adapter.hAdapter};
+          D3DKMT_CLOSEADAPTER d3dkmt_close_adapter_wrap = { d3dkmt_adapter.hAdapter };
           if (FAILED(d3dkmt_close_adapter(&d3dkmt_close_adapter_wrap))) {
             BOOST_LOG(error) << "D3DKMTCloseAdapter() failed while trying to determine GPU HAGS status";
           }
@@ -662,16 +761,15 @@ namespace platf::dxgi {
             // As of 2023.07, NVIDIA driver has unfixed bug(s) where "realtime" can cause unrecoverable encoding freeze or outright driver crash
             // This issue happens more frequently with HAGS, in DX12 games or when VRAM is filled close to max capacity
             // Track OBS to see if they find better workaround or NVIDIA fixes it on their end, they seem to be in communication
-            if (hags_enabled && !config::video.nv_realtime_hags) {
-              priority = D3DKMT_SCHEDULINGPRIORITYCLASS_HIGH;
-            }
+            if (hags_enabled && !config::video.nv_realtime_hags) priority = D3DKMT_SCHEDULINGPRIORITYCLASS_HIGH;
           }
           BOOST_LOG(info) << "Active GPU has HAGS " << (hags_enabled ? "enabled" : "disabled");
           BOOST_LOG(info) << "Using " << (priority == D3DKMT_SCHEDULINGPRIORITYCLASS_HIGH ? "high" : "realtime") << " GPU priority";
           if (FAILED(d3dkmt_set_process_priority(GetCurrentProcess(), priority))) {
             BOOST_LOG(warning) << "Failed to adjust GPU priority. Please run application as administrator for optimal performance.";
           }
-        } else {
+        }
+        else {
           BOOST_LOG(error) << "Couldn't load D3DKMTSetProcessSchedulingPriorityClass function from gdi32.dll to adjust GPU priority";
         }
       }
@@ -704,7 +802,12 @@ namespace platf::dxgi {
       }
     }
 
+    display_refresh_rate_rounded = GetPrimaryMonitorRefreshRate(60);
+    BOOST_LOG(info) << "Display refresh rate [" << display_refresh_rate_rounded << "Hz]";
+
     client_frame_rate = config.framerate;
+    BOOST_LOG(info) << "Requested frame rate [" << client_frame_rate << "fps]";
+
     dxgi::output6_t output6 {};
     status = output->QueryInterface(IID_IDXGIOutput6, (void **) &output6);
     if (SUCCEEDED(status)) {
@@ -729,10 +832,14 @@ namespace platf::dxgi {
       return -1;
     }
 
+    // Changes the virtual monitor's mode
+    dup.changeMode(config);
+
     return 0;
   }
 
-  bool display_base_t::is_hdr() {
+  bool
+  display_base_t::is_hdr() {
     dxgi::output6_t output6 {};
 
     auto status = output->QueryInterface(IID_IDXGIOutput6, (void **) &output6);
@@ -747,7 +854,29 @@ namespace platf::dxgi {
     return desc1.ColorSpace == DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020;
   }
 
-  bool display_base_t::get_hdr_metadata(SS_HDR_METADATA &metadata) {
+  bool display_base_t::is_source_gamma_encoded_fp16() {
+    dxgi::output6_t output6 {};
+
+    auto status = output->QueryInterface(IID_IDXGIOutput6, (void **) &output6);
+    if (FAILED(status)) {
+      return false;
+    }
+
+    DXGI_OUTPUT_DESC1 desc1;
+    output6->GetDesc1(&desc1);
+
+    // Windows 11 Auto Color Management (ACM) composes SDR desktops into an
+    // FP16 framebuffer but the pixel values remain gamma-encoded (G22).
+    // The "linear" shader path assumes linear scRGB FP16 (G10) and applies
+    // ApplySRGBCurve, which double-encodes the already-sRGB G22 values,
+    // crushing highlights to white. Use this method to route G22+FP16 input
+    // through the non-linear shader path (saturate only, no curve).
+    return desc1.ColorSpace == DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709
+        || desc1.ColorSpace == DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P2020;
+  }
+
+  bool
+  display_base_t::get_hdr_metadata(SS_HDR_METADATA &metadata) {
     dxgi::output6_t output6 {};
 
     std::memset(&metadata, 0, sizeof(metadata));
@@ -918,31 +1047,20 @@ namespace platf::dxgi {
     "DXGI_FORMAT_A8P8",
     "DXGI_FORMAT_B4G4R4A4_UNORM",
 
-    nullptr,
-    nullptr,
-    nullptr,
-    nullptr,
-    nullptr,
-    nullptr,
-    nullptr,
-    nullptr,
-    nullptr,
-    nullptr,
-    nullptr,
-    nullptr,
-    nullptr,
-    nullptr,
+    NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
 
     "DXGI_FORMAT_P208",
     "DXGI_FORMAT_V208",
     "DXGI_FORMAT_V408"
   };
 
-  const char *display_base_t::dxgi_format_to_string(DXGI_FORMAT format) {
+  const char *
+  display_base_t::dxgi_format_to_string(DXGI_FORMAT format) {
     return format_str[format];
   }
 
-  const char *display_base_t::colorspace_to_string(DXGI_COLOR_SPACE_TYPE type) {
+  const char *
+  display_base_t::colorspace_to_string(DXGI_COLOR_SPACE_TYPE type) {
     const char *type_str[] = {
       "DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709",
       "DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709",
@@ -973,7 +1091,8 @@ namespace platf::dxgi {
 
     if (type < ARRAYSIZE(type_str)) {
       return type_str[type];
-    } else {
+    }
+    else {
       return "UNKNOWN";
     }
   }
@@ -981,60 +1100,33 @@ namespace platf::dxgi {
 }  // namespace platf::dxgi
 
 namespace platf {
-  /**
-   * Pick a display adapter and capture method.
-   * @param hwdevice_type enables possible use of hardware encoder
-   */
-  std::shared_ptr<display_t> display(mem_type_e hwdevice_type, const std::string &display_name, const video::config_t &config) {
-    if (config::video.capture == "ddx" || config::video.capture.empty()) {
-      if (hwdevice_type == mem_type_e::dxgi) {
-        auto disp = std::make_shared<dxgi::display_ddup_vram_t>();
+  std::shared_ptr<display_t>
+  display(mem_type_e hwdevice_type, const std::string &display_name, const video::config_t &config) {
+    if (hwdevice_type == mem_type_e::dxgi) {
+      auto disp = std::make_shared<dxgi::display_vram_t>();
 
-        if (!disp->init(config, display_name)) {
-          return disp;
-        }
-      } else if (hwdevice_type == mem_type_e::system) {
-        auto disp = std::make_shared<dxgi::display_ddup_ram_t>();
+      if (!disp->init(config, display_name)) {
+        return disp;
+      }
+    }
+    else if (hwdevice_type == mem_type_e::system) {
+      auto disp = std::make_shared<dxgi::display_ram_t>();
 
-        if (!disp->init(config, display_name)) {
-          return disp;
-        }
+      if (!disp->init(config, display_name)) {
+        return disp;
       }
     }
 
-    if (config::video.capture == "wgc" || config::video.capture.empty()) {
-      if (hwdevice_type == mem_type_e::dxgi) {
-        auto disp = std::make_shared<dxgi::display_wgc_vram_t>();
-
-        if (!disp->init(config, display_name)) {
-          return disp;
-        }
-      } else if (hwdevice_type == mem_type_e::system) {
-        auto disp = std::make_shared<dxgi::display_wgc_ram_t>();
-
-        if (!disp->init(config, display_name)) {
-          return disp;
-        }
-      }
-    }
-
-    // ddx and wgc failed
     return nullptr;
   }
 
-  std::vector<std::string> display_names(mem_type_e) {
+  std::vector<std::string>
+  display_names(mem_type_e) {
     std::vector<std::string> display_names;
 
     HRESULT status;
 
     BOOST_LOG(debug) << "Detecting monitors..."sv;
-
-    // We sync the thread desktop once before we start the enumeration process
-    // to ensure test_dxgi_duplication() returns consistent results for all GPUs
-    // even if the current desktop changes during our enumeration process.
-    // It is critical that we either fully succeed in enumeration or fully fail,
-    // otherwise it can lead to the capture code switching monitors unexpectedly.
-    syncThreadDesktop();
 
     dxgi::factory1_t factory;
     status = CreateDXGIFactory1(IID_IDXGIFactory1, (void **) &factory);
@@ -1062,7 +1154,7 @@ namespace platf {
 
       dxgi::output_t::pointer output_p {};
       for (int y = 0; adapter->EnumOutputs(y, &output_p) != DXGI_ERROR_NOT_FOUND; ++y) {
-        dxgi::output_t output {output_p};
+        dxgi::output_t output { output_p };
 
         DXGI_OUTPUT_DESC desc;
         output->GetDesc(&desc);
@@ -1079,7 +1171,7 @@ namespace platf {
           << std::endl;
 
         // Don't include the display in the list if we can't actually capture it
-        if (desc.AttachedToDesktop && dxgi::test_dxgi_duplication(adapter, output, true)) {
+        if (desc.AttachedToDesktop) {
           display_names.emplace_back(std::move(device_name));
         }
       }
@@ -1092,7 +1184,8 @@ namespace platf {
    * @brief Returns if GPUs/drivers have changed since the last call to this function.
    * @return `true` if a change has occurred or if it is unknown whether a change occurred.
    */
-  bool needs_encoder_reenumeration() {
+  bool
+  needs_encoder_reenumeration() {
     // Serialize access to the static DXGI factory
     static std::mutex reenumeration_state_lock;
     auto lg = std::lock_guard(reenumeration_state_lock);
@@ -1112,7 +1205,8 @@ namespace platf {
       // can deal with any initialization races that may occur when the system is booting.
       BOOST_LOG(info) << "Encoder reenumeration is required"sv;
       return true;
-    } else {
+    }
+    else {
       // The DXGI factory from last time is still current, so no encoder changes have occurred.
       return false;
     }

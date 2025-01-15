@@ -11,9 +11,6 @@
 #include <cmath>
 #include <thread>
 
-// lib includes
-#include <ViGEm/Client.h>
-
 // local includes
 #include "keylayout.h"
 #include "misc.h"
@@ -23,10 +20,286 @@
 #include "src/platform/common.h"
 
 #ifdef __MINGW32__
-DECLARE_HANDLE(HSYNTHETICPOINTERDEVICE);
 WINUSERAPI HSYNTHETICPOINTERDEVICE WINAPI CreateSyntheticPointerDevice(POINTER_INPUT_TYPE pointerType, ULONG maxCount, POINTER_FEEDBACK_MODE mode);
 WINUSERAPI BOOL WINAPI InjectSyntheticPointerInput(HSYNTHETICPOINTERDEVICE device, CONST POINTER_TYPE_INFO *pointerInfo, UINT32 count);
 WINUSERAPI VOID WINAPI DestroySyntheticPointerDevice(HSYNTHETICPOINTERDEVICE device);
+
+/**
+ * @brief The supported controller types.
+ */
+typedef enum _DUO_CONTROLLER_TYPE
+{
+  DuoControllerTypeXbox = 0,
+  DuoControllerTypeDualShock4 = 1,
+  DuoControllerTypeDualSense = 2,
+  DuoControllerTypeDualSenseEdge = 3,
+} DUO_CONTROLLER_TYPE;
+
+/**
+ * @brief The populated fields in the output report.
+ */
+typedef enum _SYNTHETIC_CONTROLLER_OUTPUT_REPORT_FLAGS
+{
+  SYNTHETIC_CONTROLLER_OUTPUT_REPORT_FLAG_RIGHT_MOTOR_VALID = 0x1,
+  SYNTHETIC_CONTROLLER_OUTPUT_REPORT_FLAG_LEFT_MOTOR_VALID = 0x2,
+  SYNTHETIC_CONTROLLER_OUTPUT_REPORT_FLAG_RIGHT_TRIGGER_VALID = 0x4,
+  SYNTHETIC_CONTROLLER_OUTPUT_REPORT_FLAG_LEFT_TRIGGER_VALID = 0x8,
+} SYNTHETIC_CONTROLLER_OUTPUT_REPORT_FLAGS;
+
+/**
+ * The power state of the DualSense controller's battery.
+ */
+typedef enum _POWER_STATE {
+  Discharging = 0x00, // Use PowerPercent
+  Charging = 0x01, // Use PowerPercent
+  Complete = 0x02, // PowerPercent not valid? assume 100%?
+  AbnormalVoltage = 0x0A, // PowerPercent not valid?
+  AbnormalTemperature = 0x0B, // PowerPercent not valid?
+  ChargingError = 0x0F  // PowerPercent not valid?
+} POWER_STATE;
+
+#pragma pack(push, 1)
+
+/**
+ * @brief The Xbox controller input report structure.
+ */
+typedef struct _DUO_CONTROLLER_INPUT_REPORT_XBOX
+{
+  UINT8 Sync : 1; // Unused
+  UINT8 Guide : 1;
+  UINT8 Start : 1;
+  UINT8 Back : 1;
+
+  UINT8 A : 1;
+  UINT8 B : 1;
+  UINT8 X : 1;
+  UINT8 Y : 1;
+
+  UINT8 DPad : 4; // 0=None, 1=North, 2=Northeast, ..., 8=Northwest (clockwise)
+
+  UINT8 LeftBumper : 1;
+  UINT8 RightBumper : 1;
+  UINT8 LeftStick : 1;
+  UINT8 RightStick : 1;
+
+  UINT8 LeftTrigger; // Analog 0-255
+  UINT8 RightTrigger; // Analog 0-255
+
+  UINT16 LeftStickHorizontal; // 0 (far left) to 65535 (far right)
+  UINT16 LeftStickVertical;   // 0 (far top) to 65535 (far bottom)
+  UINT16 RightStickHorizontal; // 0 (far left) to 65535 (far right)
+  UINT16 RightStickVertical; // 0 (far top) to 65535 (far bottom)
+} DUO_CONTROLLER_INPUT_REPORT_XBOX;
+
+/**
+ * Touch finger data for a single touch point. Bit-packed per DualSense wire format (4 bytes).
+ */
+typedef struct _DS_TOUCH_FINGER_DATA
+{
+  UINT32 Index : 7;
+  UINT32 NotTouching : 1;
+  UINT32 FingerX : 12;
+  UINT32 FingerY : 12;
+} DS_TOUCH_FINGER_DATA;
+
+/**
+ * @brief Touch data block from DualSense input report (9 bytes = 2 finger records + timestamp).
+ */
+typedef struct _DS_TOUCH_DATA
+{
+  DS_TOUCH_FINGER_DATA Finger[2];
+  UINT8 Timestamp;
+} DS_TOUCH_DATA;
+
+/**
+ * @brief The DualSense Edge controller input report structure.
+ */
+typedef struct _DUO_CONTROLLER_INPUT_REPORT_DS
+{
+  UINT8 LeftStickX;
+  UINT8 LeftStickY;
+  UINT8 RightStickX;
+  UINT8 RightStickY;
+  UINT8 TriggerLeft;
+  UINT8 TriggerRight;
+  UINT8 SeqNo;
+
+  UINT8 DPad : 4;
+  UINT8 ButtonSquare : 1;
+  UINT8 ButtonCross : 1;
+  UINT8 ButtonCircle : 1;
+  UINT8 ButtonTriangle : 1;
+
+  UINT8 ButtonL1 : 1;
+  UINT8 ButtonR1 : 1;
+  UINT8 ButtonL2 : 1;
+  UINT8 ButtonR2 : 1;
+  UINT8 ButtonCreate : 1;
+  UINT8 ButtonOptions : 1;
+  UINT8 ButtonL3 : 1;
+  UINT8 ButtonR3 : 1;
+
+  UINT8 ButtonHome : 1;
+  UINT8 ButtonPad : 1;
+  UINT8 ButtonMute : 1;
+  UINT8 Reserved1 : 1;
+  UINT8 ButtonLeftFunction : 1;
+  UINT8 ButtonRightFunction : 1;
+  UINT8 ButtonLeftPaddle : 1;
+  UINT8 ButtonRightPaddle : 1;
+
+  UINT8 Reserved2;
+  UINT32 ReservedCounter;
+
+  INT16 AngularVelocityX;
+  INT16 AngularVelocityY;
+  INT16 AngularVelocityZ;
+
+  INT16 AccelerometerX;
+  INT16 AccelerometerY;
+  INT16 AccelerometerZ;
+
+  UINT32 SensorTimestamp;
+  INT8 Temperature;
+
+  DS_TOUCH_DATA TouchData;
+
+  UINT8 TriggerRightStopLocation : 4;
+  UINT8 TriggerRightStatus : 4;
+
+  UINT8 TriggerLeftStopLocation : 4;
+  UINT8 TriggerLeftStatus : 4;
+
+  UINT32 HostTimestamp;
+
+  UINT8 TriggerRightEffect : 4;
+  UINT8 TriggerLeftEffect : 4;
+
+  UINT32 DeviceTimeStamp;
+
+  UINT8 PowerPercent : 4;
+  UINT8 PowerState : 4;
+
+  UINT8 PluggedHeadphones : 1;
+  UINT8 PluggedMic : 1;
+  UINT8 MicMuted : 1;
+  UINT8 PluggedUsbData : 1;
+  UINT8 PluggedUsbPower : 1;
+  UINT8 UsbPowerOnBT : 1;
+  UINT8 DockDetect : 1;
+  UINT8 PluggedUnk : 1;
+
+  UINT8 PluggedExternalMic : 1;
+  UINT8 HapticLowPassFilter : 1;
+  UINT8 Reserved3 : 6;
+
+  UINT8 AesCmac[8];
+} DUO_CONTROLLER_INPUT_REPORT_DS;
+
+/**
+ * @brief The DualShock 4 controller input report structure.
+ */
+typedef struct _DUO_CONTROLLER_INPUT_REPORT_DS4
+{
+  UINT8 LeftStickHorizontal;
+  UINT8 LeftStickVertical;
+  UINT8 RightStickHorizontal;
+  UINT8 RightStickVertical;
+
+  UINT8 LeftTrigger;
+  UINT8 RightTrigger;
+
+  UINT8 DPad; // 0 = Up, 1 = Up-Right, 2 = Right, 3 = Down-Right, 4 = Down, 5 = Down-Left, 6 = Left, 7 = Up-Left, 8 = Neutral
+
+  UINT8 Square : 1;
+  UINT8 Cross : 1;
+  UINT8 Circle : 1;
+  UINT8 Triangle : 1;
+  UINT8 L1 : 1;
+  UINT8 R1 : 1;
+  UINT8 L2 : 1;
+  UINT8 R2 : 1;
+  UINT8 Share : 1;
+  UINT8 Options : 1;
+  UINT8 L3 : 1;
+  UINT8 R3 : 1;
+  UINT8 PS : 1;
+  UINT8 Touchpad : 1;
+
+  INT16 AngularVelocityX;
+  INT16 AngularVelocityY;
+  INT16 AngularVelocityZ;
+
+  INT16 AccelerometerX;
+  INT16 AccelerometerY;
+  INT16 AccelerometerZ;
+
+  DS_TOUCH_DATA TouchData;
+} DUO_CONTROLLER_INPUT_REPORT_DS4;
+
+/**
+ * @brief The controller force feedback report structure.
+ */
+typedef struct _DUO_CONTROLLER_FORCE_FEEDBACK_REPORT
+{
+  UINT8 Flags; // SYNTHETIC_CONTROLLER_OUTPUT_REPORT_FLAG_RIGHT_MOTOR_VALID | SYNTHETIC_CONTROLLER_OUTPUT_REPORT_FLAG_LEFT_MOTOR_VALID | SYNTHETIC_CONTROLLER_OUTPUT_REPORT_FLAG_RIGHT_TRIGGER_VALID | SYNTHETIC_CONTROLLER_OUTPUT_REPORT_FLAG_LEFT_TRIGGER_VALID
+  UINT8 LeftTrigger; // 0-255
+  UINT8 RightTrigger; // 0-255
+  UINT8 LeftMotor; // 0-255
+  UINT8 RightMotor; // 0-255
+  UINT8 Duration; // 0-255 (246 on test capture, must be 255 when combined with Delay)
+  UINT8 Delay; // 0-255 (9 on test capture, must be 255 when combined with Duration)
+  UINT8 Repeat; // 0 or 1 (0 on test capture)
+  UINT8 PulsePeriod; // 0 on test capture
+  UINT8 NumberOfPulses; // 235 on test capture
+} DUO_CONTROLLER_FORCE_FEEDBACK_REPORT;
+
+#pragma pack(pop)
+
+/**
+ * @brief Receives vibration data from a Duo controller.
+ * @param controller The controller.
+ * @param report The force feedback report.
+ * @param context The context.
+ */
+typedef void (*DuoController_VibrationReportCallback_t)(void* controller, DUO_CONTROLLER_FORCE_FEEDBACK_REPORT* report, void* context);
+
+/**
+ * @brief Initializes the DuoController library.
+ * @returns S_OK if the initialization was successful.
+ */
+WINUSERAPI HRESULT WINAPI DuoController_Initialize();
+
+/**
+ * @brief Uninitializes the DuoController library.
+ * @returns S_OK if the uninitialization was successful.
+ */
+WINUSERAPI HRESULT WINAPI DuoController_Uninitialize();
+
+/**
+ * @brief Creates a new Duo controller.
+ * @param controllerType The type of controller to create.
+ * @param vibrationCallback The vibration report callback.
+ * @param vibrationCallbackContext The vibration callback context.
+ * @param controller Receives the created controller.
+ * @returns S_OK if the controller was created successfully.
+ */
+WINUSERAPI HRESULT WINAPI DuoController_CreateController(DUO_CONTROLLER_TYPE controllerType, DuoController_VibrationReportCallback_t vibrationCallback, void* vibrationCallbackContext, void** controller);
+
+/**
+ * @brief Removes a Duo controller.
+ * @param controller The controller to remove.
+ * @returns S_OK if the controller was removed successfully.
+ */
+WINUSERAPI HRESULT WINAPI DuoController_RemoveController(void* controller);
+
+/**
+ * @brief Sends an input report to the given Duo controller.
+ * @param controller The controller to send the input report to.
+ * @param inputReport The input report to send.
+ * @returns S_OK if the report was sent successfully.
+ */
+WINUSERAPI HRESULT WINAPI DuoController_SendReport(void* controller, void* inputReport);
 #endif
 
 namespace platf {
@@ -41,133 +314,68 @@ namespace platf {
     65535
   };
 
-  using client_t = util::safe_ptr<_VIGEM_CLIENT_T, vigem_free>;
-  using target_t = util::safe_ptr<_VIGEM_TARGET_T, vigem_target_free>;
-
-  void CALLBACK x360_notify(
-    client_t::pointer client,
-    target_t::pointer target,
-    std::uint8_t largeMotor,
-    std::uint8_t smallMotor,
-    std::uint8_t /* led_number */,
-    void *userdata
-  );
-
-  void CALLBACK ds4_notify(
-    client_t::pointer client,
-    target_t::pointer target,
-    std::uint8_t largeMotor,
-    std::uint8_t smallMotor,
-    DS4_LIGHTBAR_COLOR /* led_color */,
-    void *userdata
-  );
-
-  struct gp_touch_context_t {
-    uint8_t pointerIndex;
-    uint16_t x;
-    uint16_t y;
-  };
-
   struct gamepad_context_t {
-    target_t gp;
+    // The DuoController handle
+    void* gp;
+
+    // The feedback queue used to report back vibration
     feedback_queue_t feedback_queue;
 
-    union {
-      XUSB_REPORT x360;
-      DS4_REPORT_EX ds4;
-    } report;
+    // The controller type
+    DUO_CONTROLLER_TYPE type;
+
+    // The current Xbox input report containing the buttons and axes
+    DUO_CONTROLLER_INPUT_REPORT_XBOX xbox_report;
+
+    // The current DualSense input report containing the buttons and axes
+    DUO_CONTROLLER_INPUT_REPORT_DS ds_report;
+
+    // The current DualShock 4 input report containing the buttons and axes
+    DUO_CONTROLLER_INPUT_REPORT_DS4 ds4_report;
 
     // Map from pointer ID to pointer index
     std::map<uint32_t, uint8_t> pointer_id_map;
     uint8_t available_pointers;
 
+    // The client relative index
     uint8_t client_relative_index;
 
-    thread_pool_util::ThreadPool::task_id_t repeat_task {};
-    std::chrono::steady_clock::time_point last_report_ts;
-
+    // The last reported rumble motor states
     gamepad_feedback_msg_t last_rumble;
-    gamepad_feedback_msg_t last_rgb_led;
   };
 
   constexpr float EARTH_G = 9.80665f;
 
-#define MPS2_TO_DS4_ACCEL(x) (int32_t) (((x) / EARTH_G) * 8192)
-#define DPS_TO_DS4_GYRO(x) (int32_t) ((x) * (1024 / 64))
-
-#define APPLY_CALIBRATION(val, bias, scale) (int32_t) (((float) (val) + (bias)) / (scale))
-
-  constexpr DS4_TOUCH ds4_touch_unused = {
-    .bPacketCounter = 0,
-    .bIsUpTrackingNum1 = 0x80,
-    .bTouchData1 = {0x00, 0x00, 0x00},
-    .bIsUpTrackingNum2 = 0x80,
-    .bTouchData2 = {0x00, 0x00, 0x00},
-  };
-
-  // See https://github.com/ViGEm/ViGEmBus/blob/22835473d17fbf0c4d4bb2f2d42fd692b6e44df4/sys/Ds4Pdo.cpp#L153-L164
-  constexpr DS4_REPORT_EX ds4_report_init_ex = {
-    {{.bThumbLX = 0x80,
-      .bThumbLY = 0x80,
-      .bThumbRX = 0x80,
-      .bThumbRY = 0x80,
-      .wButtons = DS4_BUTTON_DPAD_NONE,
-      .bSpecial = 0,
-      .bTriggerL = 0,
-      .bTriggerR = 0,
-      .wTimestamp = 0,
-      .bBatteryLvl = 0xFF,
-      .wGyroX = 0,
-      .wGyroY = 0,
-      .wGyroZ = 0,
-      .wAccelX = 0,
-      .wAccelY = 0,
-      .wAccelZ = 0,
-      ._bUnknown1 = {0x00, 0x00, 0x00, 0x00, 0x00},
-      .bBatteryLvlSpecial = 0x1A,  // Wired - Full battery
-      ._bUnknown2 = {0x00, 0x00},
-      .bTouchPacketsN = 1,
-      .sCurrentTouch = ds4_touch_unused,
-      .sPreviousTouch = {ds4_touch_unused, ds4_touch_unused}}}
-  };
+#define MPS2_TO_DS_ACCEL(x) (int32_t) (((x) / EARTH_G) * 8192)
+#define DPS_TO_DS_GYRO(x) (int32_t) ((x) * (1024 / 64))
 
   /**
-   * @brief Updates the DS4 input report with the provided motion data.
+   * @brief Updates the input report with the provided motion data.
    * @details Acceleration is in m/s^2 and gyro is in deg/s.
-   * @param gamepad The gamepad to update.
+   * @tparam T The report type (DUO_CONTROLLER_INPUT_REPORT_DS or DUO_CONTROLLER_INPUT_REPORT_DS4).
+   * @param report The input report to update.
    * @param motion_type The type of motion data.
    * @param x X component of motion.
    * @param y Y component of motion.
    * @param z Z component of motion.
    */
-  static void ds4_update_motion(gamepad_context_t &gamepad, uint8_t motion_type, float x, float y, float z) {
-    auto &report = gamepad.report.ds4.Report;
-
+  template <typename T>
+  static void update_motion(T &report, uint8_t motion_type, float x, float y, float z) {
     // Use int32 to process this data, so we can clamp if needed.
     int32_t intX, intY, intZ;
 
     switch (motion_type) {
       case LI_MOTION_TYPE_ACCEL:
-        // Convert to the DS4's accelerometer scale
-        intX = MPS2_TO_DS4_ACCEL(x);
-        intY = MPS2_TO_DS4_ACCEL(y);
-        intZ = MPS2_TO_DS4_ACCEL(z);
-
-        // Apply the inverse of ViGEmBus's calibration data
-        intX = APPLY_CALIBRATION(intX, -297, 1.010796f);
-        intY = APPLY_CALIBRATION(intY, -42, 1.014614f);
-        intZ = APPLY_CALIBRATION(intZ, -512, 1.024768f);
+        // Convert to the DualSense accelerometer scale
+        intX = MPS2_TO_DS_ACCEL(x);
+        intY = MPS2_TO_DS_ACCEL(y);
+        intZ = MPS2_TO_DS_ACCEL(z);
         break;
       case LI_MOTION_TYPE_GYRO:
-        // Convert to the DS4's gyro scale
-        intX = DPS_TO_DS4_GYRO(x);
-        intY = DPS_TO_DS4_GYRO(y);
-        intZ = DPS_TO_DS4_GYRO(z);
-
-        // Apply the inverse of ViGEmBus's calibration data
-        intX = APPLY_CALIBRATION(intX, 1, 0.977596f);
-        intY = APPLY_CALIBRATION(intY, 0, 0.972370f);
-        intZ = APPLY_CALIBRATION(intZ, 0, 0.971550f);
+        // Convert to the DualSense gyro scale
+        intX = DPS_TO_DS_GYRO(x);
+        intY = DPS_TO_DS_GYRO(y);
+        intZ = DPS_TO_DS_GYRO(z);
         break;
       default:
         return;
@@ -181,78 +389,123 @@ namespace platf {
     // Populate the report
     switch (motion_type) {
       case LI_MOTION_TYPE_ACCEL:
-        report.wAccelX = (int16_t) intX;
-        report.wAccelY = (int16_t) intY;
-        report.wAccelZ = (int16_t) intZ;
+        report.AccelerometerX = (int16_t) intX;
+        report.AccelerometerY = (int16_t) intY;
+        report.AccelerometerZ = (int16_t) intZ;
         break;
       case LI_MOTION_TYPE_GYRO:
-        report.wGyroX = (int16_t) intX;
-        report.wGyroY = (int16_t) intY;
-        report.wGyroZ = (int16_t) intZ;
+        report.AngularVelocityX = (int16_t) intX;
+        report.AngularVelocityY = (int16_t) intY;
+        report.AngularVelocityZ = (int16_t) intZ;
         break;
       default:
         return;
     }
   }
 
-  class vigem_t {
+  class DuoController_t {
   public:
-    int init() {
-      // Probe ViGEm during startup to see if we can successfully attach gamepads. This will allow us to
-      // immediately display the error message in the web UI even before the user tries to stream.
-      client_t client {vigem_alloc()};
-      VIGEM_ERROR status = vigem_connect(client.get());
-      if (!VIGEM_SUCCESS(status)) {
-        // Log a special fatal message for this case to show the error in the web UI
-        BOOST_LOG(fatal) << "ViGEmBus is not installed or running. You must install ViGEmBus for gamepad support!"sv;
-      } else {
-        vigem_disconnect(client.get());
+    /**
+     * @brief Initializes the DuoController helper class.
+     * @returns 0 if the initialization was successful.
+     */
+    int init()
+    {
+      // Load the DuoController.dll module
+      mDuoController = LoadLibraryA("DuoController\\DuoController.dll");
+
+      // We managed to load the DuoController.dll module
+      if (mDuoController == NULL) {
+        BOOST_LOG(fatal) << "DuoController library failed to load!"sv;
+        return -1;
       }
 
+      // Get pointers to the DuoController.dll functions
+      fnDuoController_Initialize = (decltype(DuoController_Initialize) *) GetProcAddress(mDuoController, "DuoController_Initialize");
+      fnDuoController_Uninitialize = (decltype(DuoController_Uninitialize) *) GetProcAddress(mDuoController, "DuoController_Uninitialize");
+      fnDuoController_CreateController = (decltype(DuoController_CreateController) *) GetProcAddress(mDuoController, "DuoController_CreateController");
+      fnDuoController_RemoveController = (decltype(DuoController_RemoveController) *) GetProcAddress(mDuoController, "DuoController_RemoveController");
+      fnDuoController_SendReport = (decltype(DuoController_SendReport) *) GetProcAddress(mDuoController, "DuoController_SendReport");
+
+      // Initialize the DuoController API
+      if (fnDuoController_Initialize == NULL ||
+          fnDuoController_Uninitialize == NULL ||
+          fnDuoController_CreateController == NULL ||
+          fnDuoController_RemoveController == NULL ||
+          fnDuoController_SendReport == NULL) {
+        // We failed to load the DuoController library
+        BOOST_LOG(fatal) << "DuoController library is unsupported!"sv;
+        return -1;
+      }
+
+      // Probe DuoController during startup so we can show an error in the UI *before* a stream starts.
+      auto status = fnDuoController_Initialize();
+      if (FAILED(status)) {
+        // We failed to initialize the DuoController library
+        BOOST_LOG(fatal) << "DuoController library failed to initialize! " << util::hex(status).to_string_view();
+        return -1;
+      }
+
+      // Initialize the gamepad array
       gamepads.resize(MAX_GAMEPADS);
 
+      // Return success
       return 0;
     }
 
     /**
-     * @brief Attaches a new gamepad.
-     * @param id The gamepad ID.
-     * @param feedback_queue The queue for posting messages back to the client.
+     * @brief Allocates a new virtual gamepad.
+     * @param id The gamepad index.
+     * @param feedback_queue The feedback queue that will receive rumble events.
      * @param gp_type The type of gamepad.
-     * @return 0 on success.
+     * @returns 0 if the gamepad was successfully allocated.
      */
-    int alloc_gamepad_internal(const gamepad_id_t &id, feedback_queue_t &feedback_queue, VIGEM_TARGET_TYPE gp_type) {
+    int alloc_gamepad_internal(const gamepad_id_t &id, feedback_queue_t &feedback_queue, DUO_CONTROLLER_TYPE gp_type)
+    {
+      // Cast the gamepad structure
       auto &gamepad = gamepads[id.globalIndex];
+
+      // Ensure the slot isn't already in use
       assert(!gamepad.gp);
 
+      // Set the gamepad type
+      gamepad.type = gp_type;
+
+      // Assign the client relative index
       gamepad.client_relative_index = id.clientRelativeIndex;
-      gamepad.last_report_ts = std::chrono::steady_clock::now();
 
-      // Establish a connect to the ViGEm driver if we don't have one yet
-      if (!client) {
-        BOOST_LOG(debug) << "Connecting to ViGEmBus driver"sv;
-        client.reset(vigem_alloc());
-
-        auto status = vigem_connect(client.get());
-        if (!VIGEM_SUCCESS(status)) {
-          BOOST_LOG(warning) << "Couldn't setup connection to ViGEm for gamepad support ["sv << util::hex(status).to_string_view() << ']';
-          client.reset();
-          return -1;
-        }
+      // Create the virtual gamepad
+      auto status = fnDuoController_CreateController ? fnDuoController_CreateController(gamepad.type, &duo_vibration_cb, this, &gamepad.gp) : E_FAIL;
+      if (FAILED(status)) {
+        BOOST_LOG(error) << "Could not create controller: " << util::hex(status).to_string_view();
+        return -1;
       }
 
-      if (gp_type == Xbox360Wired) {
-        gamepad.gp.reset(vigem_target_x360_alloc());
-        XUSB_REPORT_INIT(&gamepad.report.x360);
-      } else {
-        gamepad.gp.reset(vigem_target_ds4_alloc());
+      // Initialize the gamepad reports
+      memset(&gamepad.xbox_report, 0, sizeof(gamepad.xbox_report));
+      memset(&gamepad.ds_report, 0, sizeof(gamepad.ds_report));
+      memset(&gamepad.ds4_report, 0, sizeof(gamepad.ds4_report));
 
-        // There is no equivalent DS4_REPORT_EX_INIT()
-        gamepad.report.ds4 = ds4_report_init_ex;
+      // We're emulating a DualSense or DualSense Edge gamepad
+      if (gamepad.type == DuoControllerTypeDualSense || gamepad.type == DuoControllerTypeDualSenseEdge) {
+        // Set the virtual battery to 100%
+        gamepad.ds_report.PowerPercent = 10;
+
+        // The PowerPercent value is ignored if not set to Charging
+        gamepad.ds_report.PowerState = (UINT8)Charging;
+
+        // Pretend we're USB-wired
+        gamepad.ds_report.PluggedUsbData = 1;
+
+        // Set initial touchpad state
+        for (int i = 0; i < 2; i++) {
+          gamepad.ds_report.TouchData.Finger[i].Index = i;
+          gamepad.ds_report.TouchData.Finger[i].NotTouching = 1;
+        }
 
         // Set initial accelerometer and gyro state
-        ds4_update_motion(gamepad, LI_MOTION_TYPE_ACCEL, 0.0f, EARTH_G, 0.0f);
-        ds4_update_motion(gamepad, LI_MOTION_TYPE_GYRO, 0.0f, 0.0f, 0.0f);
+        update_motion(gamepad.ds_report, LI_MOTION_TYPE_ACCEL, 0.0f, EARTH_G, 0.0f);
+        update_motion(gamepad.ds_report, LI_MOTION_TYPE_GYRO, 0.0f, 0.0f, 0.0f);
 
         // Request motion events from the client at 100 Hz
         feedback_queue->raise(gamepad_feedback_msg_t::make_motion_event_state(gamepad.client_relative_index, LI_MOTION_TYPE_ACCEL, 100));
@@ -262,185 +515,179 @@ namespace platf {
         gamepad.available_pointers = 0x3;
       }
 
-      auto status = vigem_target_add(client.get(), gamepad.gp.get());
-      if (!VIGEM_SUCCESS(status)) {
-        BOOST_LOG(error) << "Couldn't add Gamepad to ViGEm connection ["sv << util::hex(status).to_string_view() << ']';
+      // We're emulating a DualShock 4 gamepad
+      else if (gamepad.type == DuoControllerTypeDualShock4) {
+        // Set initial touchpad state
+        for (int i = 0; i < 2; i++) {
+          gamepad.ds4_report.TouchData.Finger[i].Index = i;
+          gamepad.ds4_report.TouchData.Finger[i].NotTouching = 1;
+        }
 
-        return -1;
+        // Set initial accelerometer and gyro state
+        update_motion(gamepad.ds4_report, LI_MOTION_TYPE_ACCEL, 0.0f, EARTH_G, 0.0f);
+        update_motion(gamepad.ds4_report, LI_MOTION_TYPE_GYRO, 0.0f, 0.0f, 0.0f);
+
+        // Request motion events from the client at 100 Hz
+        feedback_queue->raise(gamepad_feedback_msg_t::make_motion_event_state(gamepad.client_relative_index, LI_MOTION_TYPE_ACCEL, 100));
+        feedback_queue->raise(gamepad_feedback_msg_t::make_motion_event_state(gamepad.client_relative_index, LI_MOTION_TYPE_GYRO, 100));
+
+        // We support pointer index 0 and 1
+        gamepad.available_pointers = 0x3;
       }
 
+      // Keep track of the feedback queue so we can report future rumble events
       gamepad.feedback_queue = std::move(feedback_queue);
 
-      if (gp_type == Xbox360Wired) {
-        status = vigem_target_x360_register_notification(client.get(), gamepad.gp.get(), x360_notify, this);
-      } else {
-        status = vigem_target_ds4_register_notification(client.get(), gamepad.gp.get(), ds4_notify, this);
-      }
-
-      if (!VIGEM_SUCCESS(status)) {
-        BOOST_LOG(warning) << "Couldn't register notifications for rumble support ["sv << util::hex(status).to_string_view() << ']';
-      }
-
+      // Gamepad allocated successfully
       return 0;
     }
 
     /**
-     * @brief Detaches the specified gamepad
-     * @param nr The gamepad.
+     * @brief Frees the given virtual gamepad.
+     * @param nr The gamepad index.
      */
-    void free_target(int nr) {
+    void free_target(int nr)
+    {
+      // Cast the gamepad structure
       auto &gamepad = gamepads[nr];
 
-      if (gamepad.repeat_task) {
-        task_pool.cancel(gamepad.repeat_task);
-        gamepad.repeat_task = nullptr;
-      }
+      // The gamepad has been initialized
+      if (gamepad.gp) {
+        // Remove the virtual gamepad
+        auto status = fnDuoController_RemoveController ? fnDuoController_RemoveController(gamepad.gp) : E_FAIL;
+        if (FAILED(status)) {
+          BOOST_LOG(warning) << "Could not remove controller: " << util::hex(status).to_string_view();
+        }
 
-      if (gamepad.gp && vigem_target_is_attached(gamepad.gp.get())) {
-        auto status = vigem_target_remove(client.get(), gamepad.gp.get());
-        if (!VIGEM_SUCCESS(status)) {
-          BOOST_LOG(warning) << "Couldn't detach gamepad from ViGEm ["sv << util::hex(status).to_string_view() << ']';
+        // Reset the internal handle
+        gamepad.gp = NULL;
+      }
+    }
+
+    /**
+     * @brief Sends an updated gamepad report to the kernel.
+     * @tparam T The report type.
+     * @param nr The gamepad index.
+     * @param report The updated gamepad report.
+     */
+    template <typename T>
+    void SendReport(int nr, const T &report)
+    {
+      // Cast the gamepad structure
+      auto &gamepad = gamepads[nr];
+
+      // The gamepad has been initialized
+      if (gamepad.gp) {
+        // Send the gamepad report
+        auto status = fnDuoController_SendReport ? fnDuoController_SendReport(gamepad.gp, const_cast<T*>(&report)) : E_FAIL;
+        if (FAILED(status)) {
+          BOOST_LOG(error) << "Could not send controller report: " << util::hex(status).to_string_view();
+        }
+      }
+    }
+
+    /**
+     * @brief Destroys the DuoController helper class.
+     */
+    ~DuoController_t() {
+      // Iterate all gamepads
+      for (auto &gp : gamepads) {
+        // Skip gamepads that aren't in use
+        if (gp.gp) {
+          // We have access to the DuoController module exports
+          if (fnDuoController_RemoveController != NULL) {
+            // Remove the controller
+            fnDuoController_RemoveController(gp.gp);
+          }
+
+          // Reset the controller handle
+          gp.gp = NULL;
         }
       }
 
-      gamepad.gp.reset();
+      // We have access to the DuoController module exports
+      if (fnDuoController_Uninitialize != NULL) {
+        // Uninitialize the DuoController module
+        fnDuoController_Uninitialize();
+      }
 
-      // Disconnect from ViGEm if we just removed the last gamepad
-      bool disconnect = true;
-      for (auto &gamepad : gamepads) {
-        if (gamepad.gp && vigem_target_is_attached(gamepad.gp.get())) {
-          disconnect = false;
+      // We mapped the DuoController module
+      if (mDuoController != NULL) {
+        // Unmap the DuoController module
+        FreeLibrary(mDuoController);
+
+        // Reset the module handle
+        mDuoController = NULL;
+
+        // Reset the function pointers
+        fnDuoController_Initialize = NULL;
+        fnDuoController_Uninitialize = NULL;
+        fnDuoController_CreateController = NULL;
+        fnDuoController_RemoveController = NULL;
+        fnDuoController_SendReport = NULL;
+      }
+    }
+
+    // The virtual gamepad vector
+    std::vector<gamepad_context_t> gamepads;
+  private:
+    // The DuoController module handle
+    HMODULE mDuoController;
+
+    // The DuoController module exports
+    decltype(DuoController_Initialize) *fnDuoController_Initialize;
+    decltype(DuoController_Uninitialize) *fnDuoController_Uninitialize;
+    decltype(DuoController_CreateController) *fnDuoController_CreateController;
+    decltype(DuoController_RemoveController) *fnDuoController_RemoveController;
+    decltype(DuoController_SendReport) *fnDuoController_SendReport;
+
+    /**
+     * @brief Receives vibration data from the Windows kernel.
+     * @param controller The internal controller handle.
+     * @param smallMotorSpeed The small motor speed.
+     * @param largeMotorSpeed The large motor speed.
+     * @param context The callback context.
+     */
+    static void CALLBACK duo_vibration_cb(void *controller, DUO_CONTROLLER_FORCE_FEEDBACK_REPORT* report, void *context)
+    {
+      // Cast the DuoController instance
+      auto *self = reinterpret_cast<DuoController_t*>(context);
+
+      // Scale the motor values from 0~255 to 0~65535
+      uint16_t low = static_cast<uint16_t>(report->RightMotor) << 8;
+      uint16_t high = static_cast<uint16_t>(report->LeftMotor) << 8;
+
+      // Iterate all allocated virtual gamepads
+      for (int i = 0; i < self->gamepads.size(); i++)
+      {
+        // Cast the virtual gamepad
+        auto &gp = self->gamepads[i];
+
+        // We found the target virtual gamepad
+        if (gp.gp == controller)
+        {
+          // Don't waste bandwidth reporting the same event over and over
+          if (low != gp.last_rumble.data.rumble.highfreq || high != gp.last_rumble.data.rumble.lowfreq)
+          {
+            // Queue a rumble feedback message
+            gamepad_feedback_msg_t msg = gamepad_feedback_msg_t::make_rumble(gp.client_relative_index, high, low);
+            gp.feedback_queue->raise(msg);
+            gp.last_rumble = msg;
+          }
+
+          // No reason to iterate the other virtual gamepads
           break;
         }
       }
-      if (disconnect) {
-        BOOST_LOG(debug) << "Disconnecting from ViGEmBus driver"sv;
-        vigem_disconnect(client.get());
-        client.reset();
-      }
     }
-
-    /**
-     * @brief Pass rumble data back to the client.
-     * @param target The gamepad.
-     * @param largeMotor The large motor.
-     * @param smallMotor The small motor.
-     */
-    void rumble(target_t::pointer target, std::uint8_t largeMotor, std::uint8_t smallMotor) {
-      for (int x = 0; x < gamepads.size(); ++x) {
-        auto &gamepad = gamepads[x];
-
-        if (gamepad.gp.get() == target) {
-          // Convert from 8-bit to 16-bit values
-          uint16_t normalizedLargeMotor = largeMotor << 8;
-          uint16_t normalizedSmallMotor = smallMotor << 8;
-
-          // Don't resend duplicate rumble data
-          if (normalizedSmallMotor != gamepad.last_rumble.data.rumble.highfreq ||
-              normalizedLargeMotor != gamepad.last_rumble.data.rumble.lowfreq) {
-            // We have to use the client-relative index when communicating back to the client
-            gamepad_feedback_msg_t msg = gamepad_feedback_msg_t::make_rumble(
-              gamepad.client_relative_index,
-              normalizedLargeMotor,
-              normalizedSmallMotor
-            );
-            gamepad.feedback_queue->raise(msg);
-            gamepad.last_rumble = msg;
-          }
-          return;
-        }
-      }
-    }
-
-    /**
-     * @brief Pass RGB LED data back to the client.
-     * @param target The gamepad.
-     * @param r The red channel.
-     * @param g The red channel.
-     * @param b The red channel.
-     */
-    void set_rgb_led(target_t::pointer target, std::uint8_t r, std::uint8_t g, std::uint8_t b) {
-      for (int x = 0; x < gamepads.size(); ++x) {
-        auto &gamepad = gamepads[x];
-
-        if (gamepad.gp.get() == target) {
-          // Don't resend duplicate RGB data
-          if (r != gamepad.last_rgb_led.data.rgb_led.r ||
-              g != gamepad.last_rgb_led.data.rgb_led.g ||
-              b != gamepad.last_rgb_led.data.rgb_led.b) {
-            // We have to use the client-relative index when communicating back to the client
-            gamepad_feedback_msg_t msg = gamepad_feedback_msg_t::make_rgb_led(gamepad.client_relative_index, r, g, b);
-            gamepad.feedback_queue->raise(msg);
-            gamepad.last_rgb_led = msg;
-          }
-          return;
-        }
-      }
-    }
-
-    /**
-     * @brief vigem_t destructor.
-     */
-    ~vigem_t() {
-      if (client) {
-        for (auto &gamepad : gamepads) {
-          if (gamepad.gp && vigem_target_is_attached(gamepad.gp.get())) {
-            auto status = vigem_target_remove(client.get(), gamepad.gp.get());
-            if (!VIGEM_SUCCESS(status)) {
-              BOOST_LOG(warning) << "Couldn't detach gamepad from ViGEm ["sv << util::hex(status).to_string_view() << ']';
-            }
-          }
-        }
-
-        vigem_disconnect(client.get());
-      }
-    }
-
-    std::vector<gamepad_context_t> gamepads;
-
-    client_t client;
   };
-
-  void CALLBACK x360_notify(
-    client_t::pointer client,
-    target_t::pointer target,
-    std::uint8_t largeMotor,
-    std::uint8_t smallMotor,
-    std::uint8_t /* led_number */,
-    void *userdata
-  ) {
-    BOOST_LOG(debug)
-      << "largeMotor: "sv << (int) largeMotor << std::endl
-      << "smallMotor: "sv << (int) smallMotor;
-
-    task_pool.push(&vigem_t::rumble, (vigem_t *) userdata, target, largeMotor, smallMotor);
-  }
-
-  void CALLBACK ds4_notify(
-    client_t::pointer client,
-    target_t::pointer target,
-    std::uint8_t largeMotor,
-    std::uint8_t smallMotor,
-    DS4_LIGHTBAR_COLOR led_color,
-    void *userdata
-  ) {
-    BOOST_LOG(debug)
-      << "largeMotor: "sv << (int) largeMotor << std::endl
-      << "smallMotor: "sv << (int) smallMotor << std::endl
-      << "LED: "sv << util::hex(led_color.Red).to_string_view() << ' '
-      << util::hex(led_color.Green).to_string_view() << ' '
-      << util::hex(led_color.Blue).to_string_view() << std::endl;
-
-    task_pool.push(&vigem_t::rumble, (vigem_t *) userdata, target, largeMotor, smallMotor);
-    task_pool.push(&vigem_t::set_rgb_led, (vigem_t *) userdata, target, led_color.Red, led_color.Green, led_color.Blue);
-  }
 
   struct input_raw_t {
     ~input_raw_t() {
-      delete vigem;
+      delete duo;
     }
 
-    vigem_t *vigem;
+    DuoController_t *duo;
 
     decltype(CreateSyntheticPointerDevice) *fnCreateSyntheticPointerDevice;
     decltype(InjectSyntheticPointerInput) *fnInjectSyntheticPointerInput;
@@ -451,10 +698,10 @@ namespace platf {
     input_t result {new input_raw_t {}};
     auto &raw = *(input_raw_t *) result.get();
 
-    raw.vigem = new vigem_t {};
-    if (raw.vigem->init()) {
-      delete raw.vigem;
-      raw.vigem = nullptr;
+    raw.duo = new DuoController_t {};
+    if (raw.duo->init()) {
+      delete raw.duo;
+      raw.duo = nullptr;
     }
 
     // Get pointers to virtual touch/pen input functions (Win10 1809+)
@@ -1167,312 +1414,287 @@ namespace platf {
     }
   }
 
+  /**
+   * @brief Allocates a new virtual gamepad.
+   * @param input The raw input structure.
+   * @param id The virtual gamepad index.
+   * @param metadata The virtual gamepad metadata.
+   * @param feedback_queue The feedback queue used to transmit virtual gamepad output data.
+   */
   int alloc_gamepad(input_t &input, const gamepad_id_t &id, const gamepad_arrival_t &metadata, feedback_queue_t feedback_queue) {
+    // Cast the raw input structure
     auto raw = (input_raw_t *) input.get();
 
-    if (!raw->vigem) {
+    // The selected gamepad type
+    DUO_CONTROLLER_TYPE selectedGamepadType = DuoControllerTypeDualSenseEdge;
+
+    if (config::input.gamepad == "xone"sv) {
+      BOOST_LOG(info) << "Gamepad " << id.globalIndex << " will be Xbox One controller (manual selection)"sv;
+      selectedGamepadType = DuoControllerTypeXbox;
+    } else if (config::input.gamepad == "ds4"sv) {
+      BOOST_LOG(info) << "Gamepad " << id.globalIndex << " will be DualShock 4 controller (manual selection)"sv;
+      selectedGamepadType = DuoControllerTypeDualShock4;
+    } else if (config::input.gamepad == "ds5"sv) {
+      BOOST_LOG(info) << "Gamepad " << id.globalIndex << " will be DualSense controller (manual selection)"sv;
+      selectedGamepadType = DuoControllerTypeDualSense;
+    } else if (config::input.gamepad == "ds5e"sv) {
+      BOOST_LOG(info) << "Gamepad " << id.globalIndex << " will be DualSense Edge controller (manual selection)"sv;
+      selectedGamepadType = DuoControllerTypeDualSenseEdge;
+    } else if (metadata.type == LI_CTYPE_PS) {
+      BOOST_LOG(info) << "Gamepad " << id.globalIndex << " will be DualShock 4 controller (auto-selected by client-reported type)"sv;
+      selectedGamepadType = DuoControllerTypeDualShock4;
+    } else if (config::input.motion_as_ds4 && (metadata.capabilities & (LI_CCAP_ACCEL | LI_CCAP_GYRO))) {
+      BOOST_LOG(info) << "Gamepad " << id.globalIndex << " will be DualShock 4 controller (auto-selected by motion sensor presence)"sv;
+      selectedGamepadType = DuoControllerTypeDualShock4;
+    } else if (config::input.touchpad_as_ds4 && (metadata.capabilities & LI_CCAP_TOUCHPAD)) {
+      BOOST_LOG(info) << "Gamepad " << id.globalIndex << " will be DualShock 4 controller (auto-selected by touchpad presence)"sv;
+      selectedGamepadType = DuoControllerTypeDualShock4;
+    } else {
+      BOOST_LOG(info) << "Gamepad " << id.globalIndex << " will be DualShock 4 controller (default)"sv;
+      selectedGamepadType = DuoControllerTypeDualShock4;
+    }
+
+    if (selectedGamepadType == DuoControllerTypeXbox) {
+      if (metadata.capabilities & (LI_CCAP_ACCEL | LI_CCAP_GYRO)) {
+        BOOST_LOG(warning) << "Gamepad " << id.globalIndex << " has motion sensors, but they are not usable when emulating an Xbox One controller"sv;
+      }
+      if (metadata.capabilities & LI_CCAP_TOUCHPAD) {
+        BOOST_LOG(warning) << "Gamepad " << id.globalIndex << " has a touchpad, but it is not usable when emulating an Xbox One controller"sv;
+      }
+      if (metadata.capabilities & LI_CCAP_RGB_LED) {
+        BOOST_LOG(warning) << "Gamepad " << id.globalIndex << " has an RGB LED, but it is not usable when emulating an Xbox One controller"sv;
+      }
+    } else if (selectedGamepadType != DuoControllerTypeXbox) {
+      if (!(metadata.capabilities & (LI_CCAP_ACCEL | LI_CCAP_GYRO))) {
+        BOOST_LOG(warning) << "Gamepad " << id.globalIndex << " is emulating a PlayStation controller, but the client gamepad doesn't have motion sensors active"sv;
+      }
+      if (!(metadata.capabilities & LI_CCAP_TOUCHPAD)) {
+        BOOST_LOG(warning) << "Gamepad " << id.globalIndex << " is emulating a PlayStation controller, but the client gamepad doesn't have a touchpad"sv;
+      }
+    }
+
+    // Allocate a new virtual gamepad
+    return raw->duo->alloc_gamepad_internal(id, feedback_queue, selectedGamepadType);
+  }
+
+  /**
+   * @brief Frees the given virtual gamepad.
+   * @param input The raw input structure.
+   * @param nr The virtual gamepad index.
+   */
+  void free_gamepad(input_t &input, int nr) {
+    // Cast the raw input structure
+    auto raw = (input_raw_t *) input.get();
+
+    // Free the virtual gamepad
+    raw->duo->free_target(nr);
+  }
+
+  /**
+   * @brief Snaps to the analog stick axis boundary.
+   * @param val The analog stick axis.
+   * @return The snapped analog stick axis.
+   */
+  static inline uint16_t snap_to_analog_stick_axis_boundary(int16_t val)
+  {
+    // Convert signed range (-32768..32767) to unsigned (0..65535)
+    const uint16_t unsigned_val = static_cast<uint16_t>(static_cast<int32_t>(val) + 32768);
+
+    // Distance to the lower bound (0)
+    const uint16_t dist_low = unsigned_val;
+
+    // Distance to the upper bound (65535)
+    const uint16_t dist_high = 65535 - unsigned_val;
+
+    // We're close enough to the lower boundary
+    if (dist_low <= 10) {
       return 0;
     }
 
-    VIGEM_TARGET_TYPE selectedGamepadType;
-
-    if (config::input.gamepad == "x360"sv) {
-      BOOST_LOG(info) << "Gamepad " << id.globalIndex << " will be Xbox 360 controller (manual selection)"sv;
-      selectedGamepadType = Xbox360Wired;
-    } else if (config::input.gamepad == "ds4"sv) {
-      BOOST_LOG(info) << "Gamepad " << id.globalIndex << " will be DualShock 4 controller (manual selection)"sv;
-      selectedGamepadType = DualShock4Wired;
-    } else if (metadata.type == LI_CTYPE_PS) {
-      BOOST_LOG(info) << "Gamepad " << id.globalIndex << " will be DualShock 4 controller (auto-selected by client-reported type)"sv;
-      selectedGamepadType = DualShock4Wired;
-    } else if (metadata.type == LI_CTYPE_XBOX) {
-      BOOST_LOG(info) << "Gamepad " << id.globalIndex << " will be Xbox 360 controller (auto-selected by client-reported type)"sv;
-      selectedGamepadType = Xbox360Wired;
-    } else if (config::input.motion_as_ds4 && (metadata.capabilities & (LI_CCAP_ACCEL | LI_CCAP_GYRO))) {
-      BOOST_LOG(info) << "Gamepad " << id.globalIndex << " will be DualShock 4 controller (auto-selected by motion sensor presence)"sv;
-      selectedGamepadType = DualShock4Wired;
-    } else if (config::input.touchpad_as_ds4 && (metadata.capabilities & LI_CCAP_TOUCHPAD)) {
-      BOOST_LOG(info) << "Gamepad " << id.globalIndex << " will be DualShock 4 controller (auto-selected by touchpad presence)"sv;
-      selectedGamepadType = DualShock4Wired;
-    } else {
-      BOOST_LOG(info) << "Gamepad " << id.globalIndex << " will be Xbox 360 controller (default)"sv;
-      selectedGamepadType = Xbox360Wired;
+    // We're close enough to the upper boundary
+    if (dist_high <= 10) {
+      return 65535;
     }
 
-    if (selectedGamepadType == Xbox360Wired) {
-      if (metadata.capabilities & (LI_CCAP_ACCEL | LI_CCAP_GYRO)) {
-        BOOST_LOG(warning) << "Gamepad " << id.globalIndex << " has motion sensors, but they are not usable when emulating an Xbox 360 controller"sv;
-      }
-      if (metadata.capabilities & LI_CCAP_TOUCHPAD) {
-        BOOST_LOG(warning) << "Gamepad " << id.globalIndex << " has a touchpad, but it is not usable when emulating an Xbox 360 controller"sv;
-      }
-      if (metadata.capabilities & LI_CCAP_RGB_LED) {
-        BOOST_LOG(warning) << "Gamepad " << id.globalIndex << " has an RGB LED, but it is not usable when emulating an Xbox 360 controller"sv;
-      }
-    } else if (selectedGamepadType == DualShock4Wired) {
-      if (!(metadata.capabilities & (LI_CCAP_ACCEL | LI_CCAP_GYRO))) {
-        BOOST_LOG(warning) << "Gamepad " << id.globalIndex << " is emulating a DualShock 4 controller, but the client gamepad doesn't have motion sensors active"sv;
-      }
-      if (!(metadata.capabilities & LI_CCAP_TOUCHPAD)) {
-        BOOST_LOG(warning) << "Gamepad " << id.globalIndex << " is emulating a DualShock 4 controller, but the client gamepad doesn't have a touchpad"sv;
-      }
-    }
-
-    return raw->vigem->alloc_gamepad_internal(id, feedback_queue, selectedGamepadType);
-  }
-
-  void free_gamepad(input_t &input, int nr) {
-    auto raw = (input_raw_t *) input.get();
-
-    if (!raw->vigem) {
-      return;
-    }
-
-    raw->vigem->free_target(nr);
+    // Keep the original value
+    return unsigned_val;
   }
 
   /**
-   * @brief Converts the standard button flags into X360 format.
-   * @param gamepad_state The gamepad button/axis state sent from the client.
-   * @return XUSB_BUTTON flags.
-   */
-  static XUSB_BUTTON x360_buttons(const gamepad_state_t &gamepad_state) {
-    int buttons {};
-
-    auto flags = gamepad_state.buttonFlags;
-    if (flags & DPAD_UP) {
-      buttons |= XUSB_GAMEPAD_DPAD_UP;
-    }
-    if (flags & DPAD_DOWN) {
-      buttons |= XUSB_GAMEPAD_DPAD_DOWN;
-    }
-    if (flags & DPAD_LEFT) {
-      buttons |= XUSB_GAMEPAD_DPAD_LEFT;
-    }
-    if (flags & DPAD_RIGHT) {
-      buttons |= XUSB_GAMEPAD_DPAD_RIGHT;
-    }
-    if (flags & START) {
-      buttons |= XUSB_GAMEPAD_START;
-    }
-    if (flags & BACK) {
-      buttons |= XUSB_GAMEPAD_BACK;
-    }
-    if (flags & LEFT_STICK) {
-      buttons |= XUSB_GAMEPAD_LEFT_THUMB;
-    }
-    if (flags & RIGHT_STICK) {
-      buttons |= XUSB_GAMEPAD_RIGHT_THUMB;
-    }
-    if (flags & LEFT_BUTTON) {
-      buttons |= XUSB_GAMEPAD_LEFT_SHOULDER;
-    }
-    if (flags & RIGHT_BUTTON) {
-      buttons |= XUSB_GAMEPAD_RIGHT_SHOULDER;
-    }
-    if (flags & (HOME | MISC_BUTTON)) {
-      buttons |= XUSB_GAMEPAD_GUIDE;
-    }
-    if (flags & A) {
-      buttons |= XUSB_GAMEPAD_A;
-    }
-    if (flags & B) {
-      buttons |= XUSB_GAMEPAD_B;
-    }
-    if (flags & X) {
-      buttons |= XUSB_GAMEPAD_X;
-    }
-    if (flags & Y) {
-      buttons |= XUSB_GAMEPAD_Y;
-    }
-
-    return (XUSB_BUTTON) buttons;
-  }
-
-  /**
-   * @brief Updates the X360 input report with the provided gamepad state.
+   * @brief Updates the Xbox input report with the provided gamepad state.
    * @param gamepad The gamepad to update.
    * @param gamepad_state The gamepad button/axis state sent from the client.
    */
-  static void x360_update_state(gamepad_context_t &gamepad, const gamepad_state_t &gamepad_state) {
-    auto &report = gamepad.report.x360;
-
-    report.wButtons = x360_buttons(gamepad_state);
-    report.bLeftTrigger = gamepad_state.lt;
-    report.bRightTrigger = gamepad_state.rt;
-    report.sThumbLX = gamepad_state.lsX;
-    report.sThumbLY = gamepad_state.lsY;
-    report.sThumbRX = gamepad_state.rsX;
-    report.sThumbRY = gamepad_state.rsY;
-  }
-
-  static DS4_DPAD_DIRECTIONS ds4_dpad(const gamepad_state_t &gamepad_state) {
-    auto flags = gamepad_state.buttonFlags;
-    if (flags & DPAD_UP) {
-      if (flags & DPAD_RIGHT) {
-        return DS4_BUTTON_DPAD_NORTHEAST;
-      } else if (flags & DPAD_LEFT) {
-        return DS4_BUTTON_DPAD_NORTHWEST;
-      } else {
-        return DS4_BUTTON_DPAD_NORTH;
-      }
-    }
-
-    else if (flags & DPAD_DOWN) {
-      if (flags & DPAD_RIGHT) {
-        return DS4_BUTTON_DPAD_SOUTHEAST;
-      } else if (flags & DPAD_LEFT) {
-        return DS4_BUTTON_DPAD_SOUTHWEST;
-      } else {
-        return DS4_BUTTON_DPAD_SOUTH;
-      }
-    }
-
-    else if (flags & DPAD_RIGHT) {
-      return DS4_BUTTON_DPAD_EAST;
-    }
-
-    else if (flags & DPAD_LEFT) {
-      return DS4_BUTTON_DPAD_WEST;
-    }
-
-    return DS4_BUTTON_DPAD_NONE;
-  }
-
-  /**
-   * @brief Converts the standard button flags into DS4 format.
-   * @param gamepad_state The gamepad button/axis state sent from the client.
-   * @return DS4_BUTTONS flags.
-   */
-  static DS4_BUTTONS ds4_buttons(const gamepad_state_t &gamepad_state) {
-    int buttons {};
+  static void xbox_update_state(gamepad_context_t &gamepad, const gamepad_state_t &gamepad_state) {
+    auto &report = gamepad.xbox_report;
 
     auto flags = gamepad_state.buttonFlags;
-    if (flags & LEFT_STICK) {
-      buttons |= DS4_BUTTON_THUMB_LEFT;
-    }
-    if (flags & RIGHT_STICK) {
-      buttons |= DS4_BUTTON_THUMB_RIGHT;
-    }
-    if (flags & LEFT_BUTTON) {
-      buttons |= DS4_BUTTON_SHOULDER_LEFT;
-    }
-    if (flags & RIGHT_BUTTON) {
-      buttons |= DS4_BUTTON_SHOULDER_RIGHT;
-    }
-    if (flags & START) {
-      buttons |= DS4_BUTTON_OPTIONS;
-    }
-    if (flags & BACK) {
-      buttons |= DS4_BUTTON_SHARE;
-    }
-    if (flags & A) {
-      buttons |= DS4_BUTTON_CROSS;
-    }
-    if (flags & B) {
-      buttons |= DS4_BUTTON_CIRCLE;
-    }
-    if (flags & X) {
-      buttons |= DS4_BUTTON_SQUARE;
-    }
-    if (flags & Y) {
-      buttons |= DS4_BUTTON_TRIANGLE;
-    }
 
-    if (gamepad_state.lt > 0) {
-      buttons |= DS4_BUTTON_TRIGGER_LEFT;
-    }
-    if (gamepad_state.rt > 0) {
-      buttons |= DS4_BUTTON_TRIGGER_RIGHT;
-    }
+    // Convert individual DPad flags to 0-8 value (0=None, 1=North, clockwise increments of 45°)
+    bool up    = (flags & DPAD_UP) != 0;
+    bool down  = (flags & DPAD_DOWN) != 0;
+    bool left  = (flags & DPAD_LEFT) != 0;
+    bool right = (flags & DPAD_RIGHT) != 0;
 
-    return (DS4_BUTTONS) buttons;
+    if (up && right)      report.DPad = 2;  // Northeast
+    else if (right && down) report.DPad = 4;  // Southeast
+    else if (down && left)  report.DPad = 6;  // Southwest
+    else if (left && up)    report.DPad = 8;  // Northwest
+    else if (up)            report.DPad = 1;  // North
+    else if (right)         report.DPad = 3;  // East
+    else if (down)          report.DPad = 5;  // South
+    else if (left)          report.DPad = 7;  // West
+    else                    report.DPad = 0;  // None
+    report.Start = (flags & START) != 0;
+    report.Back = (flags & BACK) != 0;
+    report.LeftStick = (flags & LEFT_STICK) != 0;
+    report.RightStick = (flags & RIGHT_STICK) != 0;
+    report.LeftBumper = (flags & LEFT_BUTTON) != 0;
+    report.RightBumper = (flags & RIGHT_BUTTON) != 0;
+    report.Guide = (flags & (HOME | MISC_BUTTON)) != 0;
+    report.A = (flags & A) != 0;
+    report.B = (flags & B) != 0;
+    report.X = (flags & X) != 0;
+    report.Y = (flags & Y) != 0;
+    report.LeftTrigger = gamepad_state.lt;
+    report.RightTrigger = gamepad_state.rt;
+    report.LeftStickHorizontal = snap_to_analog_stick_axis_boundary(gamepad_state.lsX);
+    report.LeftStickVertical = 65535 - snap_to_analog_stick_axis_boundary(gamepad_state.lsY);
+    report.RightStickHorizontal = snap_to_analog_stick_axis_boundary(gamepad_state.rsX);
+    report.RightStickVertical = 65535 - snap_to_analog_stick_axis_boundary(gamepad_state.rsY);
   }
 
-  static DS4_SPECIAL_BUTTONS ds4_special_buttons(const gamepad_state_t &gamepad_state) {
-    int buttons {};
-
-    if (gamepad_state.buttonFlags & HOME) {
-      buttons |= DS4_SPECIAL_BUTTON_PS;
-    }
-
-    // Allow either PS4/PS5 clickpad button or Xbox Series X share button to activate DS4 clickpad
-    if (gamepad_state.buttonFlags & (TOUCHPAD_BUTTON | MISC_BUTTON)) {
-      buttons |= DS4_SPECIAL_BUTTON_TOUCHPAD;
-    }
-
-    // Manual DS4 emulation: check if BACK button should also trigger DS4 touchpad click
-    if (config::input.gamepad == "ds4"sv && config::input.ds4_back_as_touchpad_click && (gamepad_state.buttonFlags & BACK)) {
-      buttons |= DS4_SPECIAL_BUTTON_TOUCHPAD;
-    }
-
-    return (DS4_SPECIAL_BUTTONS) buttons;
-  }
-
-  static std::uint8_t to_ds4_triggerX(std::int16_t v) {
+  static std::uint8_t to_ds_triggerX(std::int16_t v) {
     return (v + std::numeric_limits<std::uint16_t>::max() / 2 + 1) / 257;
   }
 
-  static std::uint8_t to_ds4_triggerY(std::int16_t v) {
+  static std::uint8_t to_ds_triggerY(std::int16_t v) {
     auto new_v = -((std::numeric_limits<std::uint16_t>::max() / 2 + v - 1)) / 257;
 
     return new_v == 0 ? 0xFF : (std::uint8_t) new_v;
   }
 
   /**
-   * @brief Updates the DS4 input report with the provided gamepad state.
+   * @brief Updates the DualSense input report with the provided gamepad state.
+   * @param gamepad The gamepad to update.
+   * @param gamepad_state The gamepad button/axis state sent from the client.
+   */
+  static void ds_update_state(gamepad_context_t &gamepad, const gamepad_state_t &gamepad_state) {
+    auto &report = gamepad.ds_report;
+
+    report.LeftStickX = to_ds_triggerX(gamepad_state.lsX);
+    report.LeftStickY = to_ds_triggerY(gamepad_state.lsY);
+
+    report.RightStickX = to_ds_triggerX(gamepad_state.rsX);
+    report.RightStickY = to_ds_triggerY(gamepad_state.rsY);
+
+    report.TriggerLeft = gamepad_state.lt;
+    report.TriggerRight = gamepad_state.rt;
+
+    auto flags = gamepad_state.buttonFlags;
+
+    if ((flags & DPAD_UP) != 0) {
+      if ((flags & DPAD_LEFT) != 0) {
+        report.DPad = 7;
+      } else if ((flags & DPAD_RIGHT) != 0) {
+        report.DPad = 1;
+      } else {
+        report.DPad = 0;
+      }
+    } else if ((flags & DPAD_DOWN) != 0) {
+      if ((flags & DPAD_LEFT) != 0) {
+        report.DPad = 5;
+      } else if ((flags & DPAD_RIGHT) != 0) {
+        report.DPad = 3;
+      } else {
+        report.DPad = 4;
+      }
+    } else if ((flags & DPAD_LEFT) != 0) {
+      report.DPad = 6;
+    } else if ((flags & DPAD_RIGHT) != 0) {
+      report.DPad = 2;
+    } else {
+      report.DPad = 8;
+    }
+
+    report.ButtonSquare = (flags & X) != 0;
+    report.ButtonCross = (flags & A) != 0;
+    report.ButtonCircle = (flags & B) != 0;
+    report.ButtonTriangle = (flags & Y) != 0;
+    report.ButtonL1 = (flags & LEFT_BUTTON) != 0;
+    report.ButtonR1 = (flags & RIGHT_BUTTON) != 0;
+    report.ButtonL2 = gamepad_state.lt > 0;
+    report.ButtonR2 = gamepad_state.rt > 0;
+    report.ButtonCreate = (flags & BACK) != 0;
+    report.ButtonOptions = (flags & START) != 0;
+    report.ButtonL3 = (flags & LEFT_STICK) != 0;
+    report.ButtonR3 = (flags & RIGHT_STICK) != 0;
+    report.ButtonHome = (flags & HOME) != 0;
+    report.ButtonPad = (flags & TOUCHPAD_BUTTON) != 0;
+    report.ButtonMute = (flags & MISC_BUTTON) != 0;
+    report.ButtonLeftFunction = (flags & PADDLE1) != 0;
+    report.ButtonRightFunction = (flags & PADDLE2) != 0;
+    report.ButtonLeftPaddle = (flags & PADDLE3) != 0;
+    report.ButtonRightPaddle = (flags & PADDLE4) != 0;
+  }
+
+  /**
+   * @brief Updates the DualShock 4 input report with the provided gamepad state.
    * @param gamepad The gamepad to update.
    * @param gamepad_state The gamepad button/axis state sent from the client.
    */
   static void ds4_update_state(gamepad_context_t &gamepad, const gamepad_state_t &gamepad_state) {
-    auto &report = gamepad.report.ds4.Report;
+    auto &report = gamepad.ds4_report;
 
-    report.wButtons = static_cast<uint16_t>(ds4_buttons(gamepad_state)) | static_cast<uint16_t>(ds4_dpad(gamepad_state));
-    report.bSpecial = ds4_special_buttons(gamepad_state);
+    report.LeftStickHorizontal = to_ds_triggerX(gamepad_state.lsX);
+    report.LeftStickVertical = to_ds_triggerY(gamepad_state.lsY);
 
-    report.bTriggerL = gamepad_state.lt;
-    report.bTriggerR = gamepad_state.rt;
+    report.RightStickHorizontal = to_ds_triggerX(gamepad_state.rsX);
+    report.RightStickVertical = to_ds_triggerY(gamepad_state.rsY);
 
-    report.bThumbLX = to_ds4_triggerX(gamepad_state.lsX);
-    report.bThumbLY = to_ds4_triggerY(gamepad_state.lsY);
+    report.LeftTrigger = gamepad_state.lt;
+    report.RightTrigger = gamepad_state.rt;
 
-    report.bThumbRX = to_ds4_triggerX(gamepad_state.rsX);
-    report.bThumbRY = to_ds4_triggerY(gamepad_state.rsY);
-  }
+    auto flags = gamepad_state.buttonFlags;
 
-  /**
-   * @brief Sends DS4 input with updated timestamps and repeats to keep timestamp updated.
-   * @details Some applications require updated timestamps values to register DS4 input.
-   * @param vigem The global ViGEm context object.
-   * @param nr The global gamepad index.
-   */
-  void ds4_update_ts_and_send(vigem_t *vigem, int nr) {
-    auto &gamepad = vigem->gamepads[nr];
-
-    // Cancel any pending updates. We will requeue one here when we're finished.
-    if (gamepad.repeat_task) {
-      task_pool.cancel(gamepad.repeat_task);
-      gamepad.repeat_task = nullptr;
-    }
-
-    if (gamepad.gp && vigem_target_is_attached(gamepad.gp.get())) {
-      auto now = std::chrono::steady_clock::now();
-      auto delta_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(now - gamepad.last_report_ts);
-
-      // Timestamp is reported in 5.333us units
-      gamepad.report.ds4.Report.wTimestamp += (uint16_t) (delta_ns.count() / 5333);
-
-      // Send the report to the virtual device
-      auto status = vigem_target_ds4_update_ex(vigem->client.get(), gamepad.gp.get(), gamepad.report.ds4);
-      if (!VIGEM_SUCCESS(status)) {
-        BOOST_LOG(warning) << "Couldn't send gamepad input to ViGEm ["sv << util::hex(status).to_string_view() << ']';
-        return;
+    if ((flags & DPAD_UP) != 0) {
+      if ((flags & DPAD_LEFT) != 0) {
+        report.DPad = 7;
+      } else if ((flags & DPAD_RIGHT) != 0) {
+        report.DPad = 1;
+      } else {
+        report.DPad = 0;
       }
-
-      // Repeat at least every 100ms to keep the 16-bit timestamp field from overflowing
-      gamepad.last_report_ts = now;
-      gamepad.repeat_task = task_pool.pushDelayed(ds4_update_ts_and_send, 100ms, vigem, nr).task_id;
+    } else if ((flags & DPAD_DOWN) != 0) {
+      if ((flags & DPAD_LEFT) != 0) {
+        report.DPad = 5;
+      } else if ((flags & DPAD_RIGHT) != 0) {
+        report.DPad = 3;
+      } else {
+        report.DPad = 4;
+      }
+    } else if ((flags & DPAD_LEFT) != 0) {
+      report.DPad = 6;
+    } else if ((flags & DPAD_RIGHT) != 0) {
+      report.DPad = 2;
+    } else {
+      report.DPad = 8;
     }
+
+    report.Square = (flags & X) != 0;
+    report.Cross = (flags & A) != 0;
+    report.Circle = (flags & B) != 0;
+    report.Triangle = (flags & Y) != 0;
+    report.L1 = (flags & LEFT_BUTTON) != 0;
+    report.R1 = (flags & RIGHT_BUTTON) != 0;
+    report.L2 = gamepad_state.lt > 0;
+    report.R2 = gamepad_state.rt > 0;
+    report.Share = (flags & BACK) != 0;
+    report.Options = (flags & START) != 0;
+    report.L3 = (flags & LEFT_STICK) != 0;
+    report.R3 = (flags & RIGHT_STICK) != 0;
+    report.PS = (flags & HOME) != 0;
+    report.Touchpad = (flags & TOUCHPAD_BUTTON) != 0;
   }
 
   /**
@@ -1482,29 +1704,19 @@ namespace platf {
    * @param gamepad_state The gamepad button/axis state sent from the client.
    */
   void gamepad_update(input_t &input, int nr, const gamepad_state_t &gamepad_state) {
-    auto vigem = ((input_raw_t *) input.get())->vigem;
+    auto duo = ((input_raw_t *) input.get())->duo;
 
-    // If there is no gamepad support
-    if (!vigem) {
-      return;
-    }
+    auto &gamepad = duo->gamepads[nr];
 
-    auto &gamepad = vigem->gamepads[nr];
-    if (!gamepad.gp) {
-      return;
-    }
-
-    VIGEM_ERROR status;
-
-    if (vigem_target_get_type(gamepad.gp.get()) == Xbox360Wired) {
-      x360_update_state(gamepad, gamepad_state);
-      status = vigem_target_x360_update(vigem->client.get(), gamepad.gp.get(), gamepad.report.x360);
-      if (!VIGEM_SUCCESS(status)) {
-        BOOST_LOG(warning) << "Couldn't send gamepad input to ViGEm ["sv << util::hex(status).to_string_view() << ']';
-      }
-    } else {
+    if (gamepad.type == DuoControllerTypeXbox) {
+      xbox_update_state(gamepad, gamepad_state);
+      duo->SendReport(nr, gamepad.xbox_report);
+    } else if (gamepad.type == DuoControllerTypeDualShock4) {
       ds4_update_state(gamepad, gamepad_state);
-      ds4_update_ts_and_send(vigem, nr);
+      duo->SendReport(nr, gamepad.ds4_report);
+    } else {
+      ds_update_state(gamepad, gamepad_state);
+      duo->SendReport(nr, gamepad.ds_report);
     }
   }
 
@@ -1514,24 +1726,22 @@ namespace platf {
    * @param touch The touch event.
    */
   void gamepad_touch(input_t &input, const gamepad_touch_t &touch) {
-    auto vigem = ((input_raw_t *) input.get())->vigem;
+    auto duo = ((input_raw_t *) input.get())->duo;
 
-    // If there is no gamepad support
-    if (!vigem) {
-      return;
-    }
+    auto &gamepad = duo->gamepads[touch.id.globalIndex];
 
-    auto &gamepad = vigem->gamepads[touch.id.globalIndex];
     if (!gamepad.gp) {
       return;
     }
 
-    // Touch is only supported on DualShock 4 controllers
-    if (vigem_target_get_type(gamepad.gp.get()) != DualShock4Wired) {
+    // Touch is only supported on PlayStation controllers
+    if (gamepad.type == DuoControllerTypeXbox) {
       return;
     }
 
-    auto &report = gamepad.report.ds4.Report;
+    auto &touchData = gamepad.type == DuoControllerTypeDualShock4
+      ? gamepad.ds4_report.TouchData
+      : gamepad.ds_report.TouchData;
 
     uint8_t pointerIndex;
     if (touch.eventType == LI_TOUCH_EVENT_DOWN) {
@@ -1541,24 +1751,26 @@ namespace platf {
         gamepad.available_pointers &= ~(1 << pointerIndex);
 
         // Set pointer 0 down
-        report.sCurrentTouch.bIsUpTrackingNum1 &= ~0x80;
-        report.sCurrentTouch.bIsUpTrackingNum1++;
+        touchData.Finger[0].Index = 0;
+        touchData.Finger[0].NotTouching = 0;
       } else if (gamepad.available_pointers & 0x2) {
         // Reserve pointer index 1 for this touch
         gamepad.pointer_id_map[touch.pointerId] = pointerIndex = 1;
         gamepad.available_pointers &= ~(1 << pointerIndex);
 
         // Set pointer 1 down
-        report.sCurrentTouch.bIsUpTrackingNum2 &= ~0x80;
-        report.sCurrentTouch.bIsUpTrackingNum2++;
+        touchData.Finger[1].Index = 1;
+        touchData.Finger[1].NotTouching = 0;
       } else {
         BOOST_LOG(warning) << "No more free pointer indices! Did the client miss an touch up event?"sv;
         return;
       }
     } else if (touch.eventType == LI_TOUCH_EVENT_CANCEL_ALL) {
       // Raise both pointers
-      report.sCurrentTouch.bIsUpTrackingNum1 |= 0x80;
-      report.sCurrentTouch.bIsUpTrackingNum2 |= 0x80;
+      touchData.Finger[0].Index = 0;
+      touchData.Finger[0].NotTouching = 1;
+      touchData.Finger[1].Index = 1;
+      touchData.Finger[1].NotTouching = 1;
 
       // Remove all pointer index mappings
       gamepad.pointer_id_map.clear();
@@ -1580,9 +1792,11 @@ namespace platf {
 
         // Set pointer up
         if (pointerIndex == 0) {
-          report.sCurrentTouch.bIsUpTrackingNum1 |= 0x80;
+          touchData.Finger[0].Index = 0;
+          touchData.Finger[0].NotTouching = 1;
         } else {
-          report.sCurrentTouch.bIsUpTrackingNum2 |= 0x80;
+          touchData.Finger[1].Index = 1;
+          touchData.Finger[1].NotTouching = 1;
         }
 
         // Free the pointer index
@@ -1596,22 +1810,22 @@ namespace platf {
     // Touchpad is 1920x943 according to ViGEm
     uint16_t x = touch.x * 1920;
     uint16_t y = touch.y * 943;
-    uint8_t touchData[] = {
-      (uint8_t) (x & 0xFF),  // Low 8 bits of X
-      (uint8_t) ((x >> 8 & 0x0F) | (y & 0x0F) << 4),  // High 4 bits of X and low 4 bits of Y
-      (uint8_t) (y >> 4 & 0xFF)  // High 8 bits of Y
-    };
 
-    report.sCurrentTouch.bPacketCounter++;
     if (touch.eventType != LI_TOUCH_EVENT_CANCEL_ALL) {
       if (pointerIndex == 0) {
-        memcpy(report.sCurrentTouch.bTouchData1, touchData, sizeof(touchData));
+        touchData.Finger[0].FingerX = x;
+        touchData.Finger[0].FingerY = y;
       } else {
-        memcpy(report.sCurrentTouch.bTouchData2, touchData, sizeof(touchData));
+        touchData.Finger[1].FingerX = x;
+        touchData.Finger[1].FingerY = y;
       }
     }
 
-    ds4_update_ts_and_send(vigem, touch.id.globalIndex);
+    if (gamepad.type == DuoControllerTypeDualShock4) {
+      duo->SendReport(touch.id.globalIndex, gamepad.ds4_report);
+    } else {
+      duo->SendReport(touch.id.globalIndex, gamepad.ds_report);
+    }
   }
 
   /**
@@ -1620,25 +1834,25 @@ namespace platf {
    * @param motion The motion event.
    */
   void gamepad_motion(input_t &input, const gamepad_motion_t &motion) {
-    auto vigem = ((input_raw_t *) input.get())->vigem;
+    auto duo = ((input_raw_t *) input.get())->duo;
 
-    // If there is no gamepad support
-    if (!vigem) {
-      return;
-    }
-
-    auto &gamepad = vigem->gamepads[motion.id.globalIndex];
+    auto &gamepad = duo->gamepads[motion.id.globalIndex];
     if (!gamepad.gp) {
       return;
     }
 
-    // Motion is only supported on DualShock 4 controllers
-    if (vigem_target_get_type(gamepad.gp.get()) != DualShock4Wired) {
+    // Motion is only supported on PlayStation controllers
+    if (gamepad.type == DuoControllerTypeXbox) {
       return;
     }
 
-    ds4_update_motion(gamepad, motion.motionType, motion.x, motion.y, motion.z);
-    ds4_update_ts_and_send(vigem, motion.id.globalIndex);
+    if (gamepad.type == DuoControllerTypeDualShock4) {
+      update_motion(gamepad.ds4_report, motion.motionType, motion.x, motion.y, motion.z);
+      duo->SendReport(motion.id.globalIndex, gamepad.ds4_report);
+    } else {
+      update_motion(gamepad.ds_report, motion.motionType, motion.x, motion.y, motion.z);
+      duo->SendReport(motion.id.globalIndex, gamepad.ds_report);
+    }
   }
 
   /**
@@ -1647,71 +1861,8 @@ namespace platf {
    * @param battery The battery event.
    */
   void gamepad_battery(input_t &input, const gamepad_battery_t &battery) {
-    auto vigem = ((input_raw_t *) input.get())->vigem;
-
-    // If there is no gamepad support
-    if (!vigem) {
-      return;
-    }
-
-    auto &gamepad = vigem->gamepads[battery.id.globalIndex];
-    if (!gamepad.gp) {
-      return;
-    }
-
-    // Battery is only supported on DualShock 4 controllers
-    if (vigem_target_get_type(gamepad.gp.get()) != DualShock4Wired) {
-      return;
-    }
-
-    // For details on the report format of these battery level fields, see:
-    // https://github.com/torvalds/linux/blob/946c6b59c56dc6e7d8364a8959cb36bf6d10bc37/drivers/hid/hid-playstation.c#L2305-L2314
-
-    auto &report = gamepad.report.ds4.Report;
-
-    // Update the battery state if it is known
-    switch (battery.state) {
-      case LI_BATTERY_STATE_CHARGING:
-      case LI_BATTERY_STATE_DISCHARGING:
-        if (battery.state == LI_BATTERY_STATE_CHARGING) {
-          report.bBatteryLvlSpecial |= 0x10;  // Connected via USB
-        } else {
-          report.bBatteryLvlSpecial &= ~0x10;  // Not connected via USB
-        }
-
-        // If there was a special battery status set before, clear that and
-        // initialize the battery level to 50%. It will be overwritten below
-        // if the actual percentage is known.
-        if ((report.bBatteryLvlSpecial & 0xF) > 0xA) {
-          report.bBatteryLvlSpecial = (report.bBatteryLvlSpecial & ~0xF) | 0x5;
-        }
-        break;
-
-      case LI_BATTERY_STATE_FULL:
-        report.bBatteryLvlSpecial = 0x1B;  // USB + Battery Full
-        report.bBatteryLvl = 0xFF;
-        break;
-
-      case LI_BATTERY_STATE_NOT_PRESENT:
-      case LI_BATTERY_STATE_NOT_CHARGING:
-        report.bBatteryLvlSpecial = 0x1F;  // USB + Charging Error
-        break;
-
-      default:
-        break;
-    }
-
-    // Update the battery level if it is known
-    if (battery.percentage != LI_BATTERY_PERCENTAGE_UNKNOWN) {
-      report.bBatteryLvl = battery.percentage * 255 / 100;
-
-      // Don't overwrite low nibble if there's a special status there (see above)
-      if ((report.bBatteryLvlSpecial & 0x10) && (report.bBatteryLvlSpecial & 0xF) <= 0xA) {
-        report.bBatteryLvlSpecial = (report.bBatteryLvlSpecial & ~0xF) | ((battery.percentage + 5) / 10);
-      }
-    }
-
-    ds4_update_ts_and_send(vigem, battery.id.globalIndex);
+    // Synthetic gamepads have no battery
+    return;
   }
 
   void freeInput(void *p) {
@@ -1721,32 +1872,13 @@ namespace platf {
   }
 
   std::vector<supported_gamepad_t> &supported_gamepads(input_t *input) {
-    if (!input) {
-      static std::vector gps {
-        supported_gamepad_t {"auto", true, ""},
-        supported_gamepad_t {"x360", false, ""},
-        supported_gamepad_t {"ds4", false, ""},
-      };
-
-      return gps;
-    }
-
-    auto vigem = ((input_raw_t *) input)->vigem;
-    auto enabled = vigem != nullptr;
-    auto reason = enabled ? "" : "gamepads.vigem-not-available";
-
-    // ds4 == ps4
     static std::vector gps {
-      supported_gamepad_t {"auto", true, reason},
-      supported_gamepad_t {"x360", enabled, reason},
-      supported_gamepad_t {"ds4", enabled, reason}
+      supported_gamepad_t {"auto", true, ""},
+      supported_gamepad_t {"xone", true, ""},
+      supported_gamepad_t {"ds4", true, ""},
+      supported_gamepad_t {"ds5", true, ""},
+      supported_gamepad_t {"ds5e", true, ""},
     };
-
-    for (auto &[name, is_enabled, reason_disabled] : gps) {
-      if (!is_enabled) {
-        BOOST_LOG(warning) << "Gamepad " << name << " is disabled due to " << reason_disabled;
-      }
-    }
 
     return gps;
   }
@@ -1759,7 +1891,7 @@ namespace platf {
     platform_caps::caps_t caps = 0;
 
     // We support controller touchpad input as long as we're not emulating X360
-    if (config::input.gamepad != "x360"sv) {
+    if (config::input.gamepad != "xone"sv) {
       caps |= platform_caps::controller_touch;
     }
 
