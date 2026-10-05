@@ -237,69 +237,66 @@ typedef struct _DUO_CONTROLLER_INPUT_REPORT_DS4
   DS_TOUCH_DATA TouchData;
 } DUO_CONTROLLER_INPUT_REPORT_DS4;
 
-/**
- * @brief The controller force feedback report structure.
- */
-typedef struct _DUO_CONTROLLER_FORCE_FEEDBACK_REPORT
-{
-  UINT8 Flags; // SYNTHETIC_CONTROLLER_OUTPUT_REPORT_FLAG_RIGHT_MOTOR_VALID | SYNTHETIC_CONTROLLER_OUTPUT_REPORT_FLAG_LEFT_MOTOR_VALID | SYNTHETIC_CONTROLLER_OUTPUT_REPORT_FLAG_RIGHT_TRIGGER_VALID | SYNTHETIC_CONTROLLER_OUTPUT_REPORT_FLAG_LEFT_TRIGGER_VALID
-  UINT8 LeftTrigger; // 0-255
-  UINT8 RightTrigger; // 0-255
-  UINT8 LeftMotor; // 0-255
-  UINT8 RightMotor; // 0-255
-  UINT8 Duration; // 0-255 (246 on test capture, must be 255 when combined with Delay)
-  UINT8 Delay; // 0-255 (9 on test capture, must be 255 when combined with Duration)
-  UINT8 Repeat; // 0 or 1 (0 on test capture)
-  UINT8 PulsePeriod; // 0 on test capture
-  UINT8 NumberOfPulses; // 235 on test capture
-} DUO_CONTROLLER_FORCE_FEEDBACK_REPORT;
-
 #pragma pack(pop)
 
 /**
- * @brief Receives vibration data from a Duo controller.
- * @param controller The controller.
- * @param report The force feedback report.
+ * @brief Receives an output report from a DuoHid controller.
+ *
+ * Unlike the DuoController callback this replaces, no decoding has happened: the report arrives as
+ * raw bytes plus a source that says which API produced them. The rumble offsets differ per controller
+ * type and are decoded at the call site from the profile's output-report layout.
+ *
  * @param context The context.
+ * @param source 0 = HID output report, 1 = HID feature report, 2 = XInput rumble, 3 = feature read.
+ * @param reportId The HID report id, or 0 when the descriptor uses none.
+ * @param data The report bytes, valid only for the duration of the call.
+ * @param dataSize The number of valid bytes in data.
  */
-typedef void (*DuoController_VibrationReportCallback_t)(void* controller, DUO_CONTROLLER_FORCE_FEEDBACK_REPORT* report, void* context);
+typedef void (CALLBACK* DuoHid_OutputCallback_t)(void* context, UCHAR source, UCHAR reportId,
+                                                 const UCHAR* data, ULONG dataSize);
 
 /**
- * @brief Initializes the DuoController library.
+ * @brief Initializes the DuoHid library.
  * @returns S_OK if the initialization was successful.
  */
-WINUSERAPI HRESULT WINAPI DuoController_Initialize();
+WINUSERAPI HRESULT WINAPI DuoHid_Initialize();
 
 /**
- * @brief Uninitializes the DuoController library.
+ * @brief Uninitializes the DuoHid library.
  * @returns S_OK if the uninitialization was successful.
  */
-WINUSERAPI HRESULT WINAPI DuoController_Uninitialize();
+WINUSERAPI HRESULT WINAPI DuoHid_Uninitialize();
 
 /**
- * @brief Creates a new Duo controller.
- * @param controllerType The type of controller to create.
- * @param vibrationCallback The vibration report callback.
- * @param vibrationCallbackContext The vibration callback context.
+ * @brief Creates a new Duo controller from a HIDMaestro profile, restricted to a session.
+ * @param profileId The HIDMaestro profile id.
+ * @param sessionId The terminal session the device is restricted to.
+ * @param outputCallback Receives output reports. May be NULL.
+ * @param outputCallbackContext The callback context.
  * @param controller Receives the created controller.
  * @returns S_OK if the controller was created successfully.
  */
-WINUSERAPI HRESULT WINAPI DuoController_CreateController(DUO_CONTROLLER_TYPE controllerType, DuoController_VibrationReportCallback_t vibrationCallback, void* vibrationCallbackContext, void** controller);
+WINUSERAPI HRESULT WINAPI DuoHid_CreateController(const wchar_t* profileId, ULONG sessionId,
+                                                  DuoHid_OutputCallback_t outputCallback,
+                                                  void* outputCallbackContext, void** controller);
 
 /**
  * @brief Removes a Duo controller.
  * @param controller The controller to remove.
  * @returns S_OK if the controller was removed successfully.
  */
-WINUSERAPI HRESULT WINAPI DuoController_RemoveController(void* controller);
+WINUSERAPI HRESULT WINAPI DuoHid_RemoveController(void* controller);
 
 /**
  * @brief Sends an input report to the given Duo controller.
  * @param controller The controller to send the input report to.
- * @param inputReport The input report to send.
+ * @param report The report bytes in the profile's native descriptor format.
+ * @param reportSize The number of valid bytes in report.
+ * @param extended Non-zero when report is a full report-id-included vendor blob.
  * @returns S_OK if the report was sent successfully.
  */
-WINUSERAPI HRESULT WINAPI DuoController_SendReport(void* controller, void* inputReport);
+WINUSERAPI HRESULT WINAPI DuoHid_SubmitReport(void* controller, const void* report,
+                                              ULONG reportSize, ULONG extended);
 #endif
 
 namespace platf {
@@ -403,48 +400,79 @@ namespace platf {
     }
   }
 
-  class DuoController_t {
+  /// <summary>
+  /// Maps a Duo controller type to the HIDMaestro profile that presents the same hardware.
+  ///
+  /// The profile ids are the ones whose VID/PID match what DuoController.inf installed
+  /// (054C:0DF2 DualSense Edge, 054C:05C4 DualShock 4 v1), so a session sees the same device
+  /// identity it saw from the driver this replaces.
+  /// </summary>
+  static const wchar_t *duo_profile_id_for_type(DUO_CONTROLLER_TYPE type) {
+    switch (type) {
+      case DuoControllerTypeDualShock4:
+        return L"dualshock-4-v1";
+      case DuoControllerTypeDualSense:
+        return L"dualsense";
+      case DuoControllerTypeDualSenseEdge:
+        return L"dualsense-edge";
+      case DuoControllerTypeXbox:
+      default:
+        return L"xbox-360-wired";
+    }
+  }
+
+  class DuoHid_t {
   public:
     /**
-     * @brief Initializes the DuoController helper class.
+     * @brief Initializes the DuoHid helper class.
      * @returns 0 if the initialization was successful.
      */
     int init()
     {
-      // Load the DuoController.dll module
-      mDuoController = LoadLibraryA("DuoController\\DuoController.dll");
+      // Load the DuoHid.dll module
+      mDuoHid = LoadLibraryA("DuoHid.dll");
 
-      // We managed to load the DuoController.dll module
-      if (mDuoController == NULL) {
-        BOOST_LOG(fatal) << "DuoController library failed to load!"sv;
+      // We managed to load the DuoHid.dll module
+      if (mDuoHid == NULL) {
+        BOOST_LOG(fatal) << "DuoHid library failed to load!"sv;
         return -1;
       }
 
-      // Get pointers to the DuoController.dll functions
-      fnDuoController_Initialize = (decltype(DuoController_Initialize) *) GetProcAddress(mDuoController, "DuoController_Initialize");
-      fnDuoController_Uninitialize = (decltype(DuoController_Uninitialize) *) GetProcAddress(mDuoController, "DuoController_Uninitialize");
-      fnDuoController_CreateController = (decltype(DuoController_CreateController) *) GetProcAddress(mDuoController, "DuoController_CreateController");
-      fnDuoController_RemoveController = (decltype(DuoController_RemoveController) *) GetProcAddress(mDuoController, "DuoController_RemoveController");
-      fnDuoController_SendReport = (decltype(DuoController_SendReport) *) GetProcAddress(mDuoController, "DuoController_SendReport");
+      // Get pointers to the DuoHid.dll functions
+      fnDuoHid_Initialize = (decltype(DuoHid_Initialize) *) GetProcAddress(mDuoHid, "DuoHid_Initialize");
+      fnDuoHid_Uninitialize = (decltype(DuoHid_Uninitialize) *) GetProcAddress(mDuoHid, "DuoHid_Uninitialize");
+      fnDuoHid_CreateController = (decltype(DuoHid_CreateController) *) GetProcAddress(mDuoHid, "DuoHid_CreateController");
+      fnDuoHid_RemoveController = (decltype(DuoHid_RemoveController) *) GetProcAddress(mDuoHid, "DuoHid_RemoveController");
+      fnDuoHid_SubmitReport = (decltype(DuoHid_SubmitReport) *) GetProcAddress(mDuoHid, "DuoHid_SubmitReport");
 
-      // Initialize the DuoController API
-      if (fnDuoController_Initialize == NULL ||
-          fnDuoController_Uninitialize == NULL ||
-          fnDuoController_CreateController == NULL ||
-          fnDuoController_RemoveController == NULL ||
-          fnDuoController_SendReport == NULL) {
-        // We failed to load the DuoController library
-        BOOST_LOG(fatal) << "DuoController library is unsupported!"sv;
+      // Initialize the DuoHid API
+      if (fnDuoHid_Initialize == NULL ||
+          fnDuoHid_Uninitialize == NULL ||
+          fnDuoHid_CreateController == NULL ||
+          fnDuoHid_RemoveController == NULL ||
+          fnDuoHid_SubmitReport == NULL) {
+        // We failed to load the DuoHid library
+        BOOST_LOG(fatal) << "DuoHid library is unsupported!"sv;
         return -1;
       }
 
-      // Probe DuoController during startup so we can show an error in the UI *before* a stream starts.
-      auto status = fnDuoController_Initialize();
+      // Probe DuoHid during startup so we can show an error in the UI *before* a stream starts.
+      auto status = fnDuoHid_Initialize();
       if (FAILED(status)) {
-        // We failed to initialize the DuoController library
-        BOOST_LOG(fatal) << "DuoController library failed to initialize! " << util::hex(status).to_string_view();
+        // We failed to initialize the DuoHid library
+        BOOST_LOG(fatal) << "DuoHid library failed to initialize! " << util::hex(status).to_string_view();
         return -1;
       }
+
+      // The session this process runs in. Every controller is restricted to it, so one user's devices
+      // are not visible to another session on the same machine - the isolation the DuoController
+      // driver used to apply from kernel mode.
+      DWORD session_id = 0;
+      if (!ProcessIdToSessionId(GetCurrentProcessId(), &session_id)) {
+        BOOST_LOG(fatal) << "Could not determine the current session id!"sv;
+        return -1;
+      }
+      mSessionId = session_id;
 
       // Initialize the gamepad array
       gamepads.resize(MAX_GAMEPADS);
@@ -474,8 +502,13 @@ namespace platf {
       // Assign the client relative index
       gamepad.client_relative_index = id.clientRelativeIndex;
 
-      // Create the virtual gamepad
-      auto status = fnDuoController_CreateController ? fnDuoController_CreateController(gamepad.type, &duo_vibration_cb, this, &gamepad.gp) : E_FAIL;
+      // Create the virtual gamepad, restricted to this process's session.
+      //
+      // The gamepad itself is passed as the callback context: HIDMaestro's output callback carries no
+      // controller handle, so the context is how an output report is attributed to a slot. The
+      // gamepads vector is sized once in init(), so this pointer stays valid.
+      const wchar_t *profile_id = duo_profile_id_for_type(gamepad.type);
+      auto status = fnDuoHid_CreateController ? fnDuoHid_CreateController(profile_id, mSessionId, &duo_output_cb, &gamepad, &gamepad.gp) : E_FAIL;
       if (FAILED(status)) {
         BOOST_LOG(error) << "Could not create controller: " << util::hex(status).to_string_view();
         return -1;
@@ -554,7 +587,7 @@ namespace platf {
       // The gamepad has been initialized
       if (gamepad.gp) {
         // Remove the virtual gamepad
-        auto status = fnDuoController_RemoveController ? fnDuoController_RemoveController(gamepad.gp) : E_FAIL;
+        auto status = fnDuoHid_RemoveController ? fnDuoHid_RemoveController(gamepad.gp) : E_FAIL;
         if (FAILED(status)) {
           BOOST_LOG(warning) << "Could not remove controller: " << util::hex(status).to_string_view();
         }
@@ -578,8 +611,9 @@ namespace platf {
 
       // The gamepad has been initialized
       if (gamepad.gp) {
-        // Send the gamepad report
-        auto status = fnDuoController_SendReport ? fnDuoController_SendReport(gamepad.gp, const_cast<T*>(&report)) : E_FAIL;
+        // Send the gamepad report. The size is passed explicitly: the old API knew the report type from
+        // the controller handle, DuoHid takes raw bytes.
+        auto status = fnDuoHid_SubmitReport ? fnDuoHid_SubmitReport(gamepad.gp, const_cast<T*>(&report), (ULONG)sizeof(T), 0) : E_FAIL;
         if (FAILED(status)) {
           BOOST_LOG(error) << "Could not send controller report: " << util::hex(status).to_string_view();
         }
@@ -589,15 +623,15 @@ namespace platf {
     /**
      * @brief Destroys the DuoController helper class.
      */
-    ~DuoController_t() {
+    ~DuoHid_t() {
       // Iterate all gamepads
       for (auto &gp : gamepads) {
         // Skip gamepads that aren't in use
         if (gp.gp) {
           // We have access to the DuoController module exports
-          if (fnDuoController_RemoveController != NULL) {
+          if (fnDuoHid_RemoveController != NULL) {
             // Remove the controller
-            fnDuoController_RemoveController(gp.gp);
+            fnDuoHid_RemoveController(gp.gp);
           }
 
           // Reset the controller handle
@@ -606,78 +640,113 @@ namespace platf {
       }
 
       // We have access to the DuoController module exports
-      if (fnDuoController_Uninitialize != NULL) {
+      if (fnDuoHid_Uninitialize != NULL) {
         // Uninitialize the DuoController module
-        fnDuoController_Uninitialize();
+        fnDuoHid_Uninitialize();
       }
 
       // We mapped the DuoController module
-      if (mDuoController != NULL) {
+      if (mDuoHid != NULL) {
         // Unmap the DuoController module
-        FreeLibrary(mDuoController);
+        FreeLibrary(mDuoHid);
 
         // Reset the module handle
-        mDuoController = NULL;
+        mDuoHid = NULL;
 
         // Reset the function pointers
-        fnDuoController_Initialize = NULL;
-        fnDuoController_Uninitialize = NULL;
-        fnDuoController_CreateController = NULL;
-        fnDuoController_RemoveController = NULL;
-        fnDuoController_SendReport = NULL;
+        fnDuoHid_Initialize = NULL;
+        fnDuoHid_Uninitialize = NULL;
+        fnDuoHid_CreateController = NULL;
+        fnDuoHid_RemoveController = NULL;
+        fnDuoHid_SubmitReport = NULL;
       }
     }
 
     // The virtual gamepad vector
     std::vector<gamepad_context_t> gamepads;
   private:
-    // The DuoController module handle
-    HMODULE mDuoController;
+    // The DuoHid module handle
+    HMODULE mDuoHid;
 
-    // The DuoController module exports
-    decltype(DuoController_Initialize) *fnDuoController_Initialize;
-    decltype(DuoController_Uninitialize) *fnDuoController_Uninitialize;
-    decltype(DuoController_CreateController) *fnDuoController_CreateController;
-    decltype(DuoController_RemoveController) *fnDuoController_RemoveController;
-    decltype(DuoController_SendReport) *fnDuoController_SendReport;
+    // The DuoHid module exports
+    decltype(DuoHid_Initialize) *fnDuoHid_Initialize;
+    decltype(DuoHid_Uninitialize) *fnDuoHid_Uninitialize;
+    decltype(DuoHid_CreateController) *fnDuoHid_CreateController;
+    decltype(DuoHid_RemoveController) *fnDuoHid_RemoveController;
+    decltype(DuoHid_SubmitReport) *fnDuoHid_SubmitReport;
+
+    // The terminal session every controller is restricted to
+    DWORD mSessionId;
 
     /**
-     * @brief Receives vibration data from the Windows kernel.
-     * @param controller The internal controller handle.
-     * @param smallMotorSpeed The small motor speed.
-     * @param largeMotorSpeed The large motor speed.
-     * @param context The callback context.
+     * @brief Receives an output report and raises the corresponding rumble feedback.
+     *
+     * DuoHid delivers raw report bytes plus the source that produced them, so the motor values are
+     * decoded here per controller type rather than handed over already parsed - which is what the
+     * DuoController callback this replaces used to receive. The offsets come from each profile's
+     * output-report layout:
+     *
+     *   DualSense / DualSense Edge - HID output report 0x02, right at byte 3, left at byte 4
+     *   DualShock 4                - HID output report 0x05, right at byte 4, left at byte 5
+     *   Xbox 360                   - XInput packet (source 2): cmd, size, left, right, reserved
+     *
+     * @param context The gamepad this controller was created for.
+     * @param source 0 = HID output report, 1 = HID feature report, 2 = XInput rumble, 3 = feature read.
+     * @param reportId The HID report id, or 0 when the descriptor uses none.
+     * @param data The report bytes.
+     * @param dataSize The number of valid bytes in data.
      */
-    static void CALLBACK duo_vibration_cb(void *controller, DUO_CONTROLLER_FORCE_FEEDBACK_REPORT* report, void *context)
+    static void CALLBACK duo_output_cb(void* context, UCHAR source, UCHAR reportId,
+                                       const UCHAR* data, ULONG dataSize)
     {
-      // Cast the DuoController instance
-      auto *self = reinterpret_cast<DuoController_t*>(context);
+      // Cast the gamepad this report belongs to
+      auto *gp = reinterpret_cast<gamepad_context_t*>(context);
+      if (gp == NULL || data == NULL) {
+        return;
+      }
+
+      // Decode the motor values for this controller type
+      uint8_t rightMotor = 0;
+      uint8_t leftMotor = 0;
+      bool decoded = false;
+
+      if (source == 2) {
+        // XInput rumble packet: cmd, size, left (large), right (small), reserved
+        if (dataSize >= 4) {
+          leftMotor = data[2];
+          rightMotor = data[3];
+          decoded = true;
+        }
+      } else if (source == 0) {
+        if (reportId == 0x02 && dataSize >= 5) {
+          // DualSense / DualSense Edge
+          rightMotor = data[3];
+          leftMotor = data[4];
+          decoded = true;
+        } else if (reportId == 0x05 && dataSize >= 6) {
+          // DualShock 4
+          rightMotor = data[4];
+          leftMotor = data[5];
+          decoded = true;
+        }
+      }
+
+      // A report with no motors in it is not an error - feature reads and configuration writes arrive
+      // through the same callback and simply carry nothing to act on.
+      if (!decoded) {
+        return;
+      }
 
       // Scale the motor values from 0~255 to 0~65535
-      uint16_t low = static_cast<uint16_t>(report->RightMotor) << 8;
-      uint16_t high = static_cast<uint16_t>(report->LeftMotor) << 8;
+      uint16_t low = static_cast<uint16_t>(rightMotor) << 8;
+      uint16_t high = static_cast<uint16_t>(leftMotor) << 8;
 
-      // Iterate all allocated virtual gamepads
-      for (int i = 0; i < self->gamepads.size(); i++)
-      {
-        // Cast the virtual gamepad
-        auto &gp = self->gamepads[i];
-
-        // We found the target virtual gamepad
-        if (gp.gp == controller)
-        {
-          // Don't waste bandwidth reporting the same event over and over
-          if (low != gp.last_rumble.data.rumble.highfreq || high != gp.last_rumble.data.rumble.lowfreq)
-          {
-            // Queue a rumble feedback message
-            gamepad_feedback_msg_t msg = gamepad_feedback_msg_t::make_rumble(gp.client_relative_index, high, low);
-            gp.feedback_queue->raise(msg);
-            gp.last_rumble = msg;
-          }
-
-          // No reason to iterate the other virtual gamepads
-          break;
-        }
+      // Don't waste bandwidth reporting the same event over and over
+      if (low != gp->last_rumble.data.rumble.highfreq || high != gp->last_rumble.data.rumble.lowfreq) {
+        // Queue a rumble feedback message
+        gamepad_feedback_msg_t msg = gamepad_feedback_msg_t::make_rumble(gp->client_relative_index, high, low);
+        gp->feedback_queue->raise(msg);
+        gp->last_rumble = msg;
       }
     }
   };
@@ -687,7 +756,7 @@ namespace platf {
       delete duo;
     }
 
-    DuoController_t *duo;
+    DuoHid_t *duo;
 
     decltype(CreateSyntheticPointerDevice) *fnCreateSyntheticPointerDevice;
     decltype(InjectSyntheticPointerInput) *fnInjectSyntheticPointerInput;
@@ -698,7 +767,7 @@ namespace platf {
     input_t result {new input_raw_t {}};
     auto &raw = *(input_raw_t *) result.get();
 
-    raw.duo = new DuoController_t {};
+    raw.duo = new DuoHid_t {};
     if (raw.duo->init()) {
       delete raw.duo;
       raw.duo = nullptr;
