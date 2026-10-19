@@ -3,7 +3,6 @@
  * @brief Definitions for handling ram.
  */
 #include "display.h"
-
 #include "misc.h"
 #include "src/logging.h"
 
@@ -20,7 +19,7 @@ namespace platf::dxgi {
   };
 
   void
-  blend_cursor_monochrome(const cursor_t &cursor, img_t &img) {
+    blend_cursor_monochrome(const cursor_t &cursor, img_t &img) {
     int height = cursor.shape_info.Height / 2;
     int width = cursor.shape_info.Width;
     int pitch = cursor.shape_info.Pitch;
@@ -83,7 +82,7 @@ namespace platf::dxgi {
   }
 
   void
-  apply_color_alpha(int *img_pixel_p, int cursor_pixel) {
+    apply_color_alpha(int *img_pixel_p, int cursor_pixel) {
     auto colors_out = (std::uint8_t *) &cursor_pixel;
     auto colors_in = (std::uint8_t *) img_pixel_p;
 
@@ -91,8 +90,7 @@ namespace platf::dxgi {
     auto alpha = colors_out[3];
     if (alpha == 255) {
       *img_pixel_p = cursor_pixel;
-    }
-    else {
+    } else {
       colors_in[0] = colors_out[0] + (colors_in[0] * (255 - alpha) + 255 / 2) / 255;
       colors_in[1] = colors_out[1] + (colors_in[1] * (255 - alpha) + 255 / 2) / 255;
       colors_in[2] = colors_out[2] + (colors_in[2] * (255 - alpha) + 255 / 2) / 255;
@@ -100,19 +98,18 @@ namespace platf::dxgi {
   }
 
   void
-  apply_color_masked(int *img_pixel_p, int cursor_pixel) {
+    apply_color_masked(int *img_pixel_p, int cursor_pixel) {
     // TODO: When use of IDXGIOutput5 is implemented, support different color formats
     auto alpha = ((std::uint8_t *) &cursor_pixel)[3];
     if (alpha == 0xFF) {
       *img_pixel_p ^= cursor_pixel;
-    }
-    else {
+    } else {
       *img_pixel_p = cursor_pixel;
     }
   }
 
   void
-  blend_cursor_color(const cursor_t &cursor, img_t &img, const bool masked) {
+    blend_cursor_color(const cursor_t &cursor, img_t &img, const bool masked) {
     int height = cursor.shape_info.Height;
     int width = cursor.shape_info.Width;
     int pitch = cursor.shape_info.Pitch;
@@ -150,8 +147,7 @@ namespace platf::dxgi {
       std::for_each(cursor_begin, cursor_end, [&](int cursor_pixel) {
         if (masked) {
           apply_color_masked(img_pixel_p, cursor_pixel);
-        }
-        else {
+        } else {
           apply_color_alpha(img_pixel_p, cursor_pixel);
         }
         ++img_pixel_p;
@@ -160,7 +156,7 @@ namespace platf::dxgi {
   }
 
   void
-  blend_cursor(const cursor_t &cursor, img_t &img) {
+    blend_cursor(const cursor_t &cursor, img_t &img) {
     switch (cursor.shape_info.Type) {
       case DXGI_OUTDUPL_POINTER_SHAPE_TYPE_COLOR:
         blend_cursor_color(cursor, img, false);
@@ -177,18 +173,17 @@ namespace platf::dxgi {
   }
 
   capture_e
-  display_ram_t::snapshot(const pull_free_image_cb_t &pull_free_image_cb, std::shared_ptr<platf::img_t> &img_out, std::chrono::milliseconds timeout, bool cursor_visible) {
+    display_ram_t::snapshot(const pull_free_image_cb_t &pull_free_image_cb, std::shared_ptr<platf::img_t> &img_out, std::chrono::milliseconds timeout, bool cursor_visible) {
     // Get the shared framebuffer texture
-    ID3D11Resource* iddTexture = NULL;
+    ID3D11Resource *iddTexture = NULL;
     capture_e result = dup.iddblt(device.get(), &iddTexture);
     if (result == capture_e::ok) {
       // We haven't determined the capture format yet
       if (capture_format == DXGI_FORMAT_UNKNOWN) {
         // Query the ID3D11Texture2D interface of the resource
-        ID3D11Texture2D* iddTexture2D = nullptr;
-        HRESULT hr = iddTexture->QueryInterface(__uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&iddTexture2D));
-        if (SUCCEEDED(hr))
-        {
+        ID3D11Texture2D *iddTexture2D = nullptr;
+        HRESULT hr = iddTexture->QueryInterface(__uuidof(ID3D11Texture2D), reinterpret_cast<void **>(&iddTexture2D));
+        if (SUCCEEDED(hr)) {
           // Get the texture description
           D3D11_TEXTURE2D_DESC desc;
           iddTexture2D->GetDesc(&desc);
@@ -202,7 +197,7 @@ namespace platf::dxgi {
       }
 
       // Get or create the staging texture
-      ID3D11Resource* stagingTexture = texture.get();
+      ID3D11Resource *stagingTexture = texture.get();
       if (stagingTexture == NULL) {
         D3D11_TEXTURE2D_DESC t {};
         t.Width = width;
@@ -228,25 +223,25 @@ namespace platf::dxgi {
         dup.resumeSwapChain();
 
         // Unmap the previous frame's pixel buffer
-        if(img_info.pData) {
+        if (img_info.pData) {
           device_ctx->Unmap(texture.get(), 0);
           img_info.pData = nullptr;
         }
 
         // Map the current frame's pixel buffer
         HRESULT status = device_ctx->Map(texture.get(), 0, D3D11_MAP_READ, 0, &img_info);
-        if(SUCCEEDED(status)) {
+        if (SUCCEEDED(status)) {
           // Get the next free image from the pool
           if (pull_free_image_cb(img_out)) {
             // Allocate the output image's pixel buffer
-            if (complete_img((img_t *)img_out.get(), false) == 0) {
+            if (complete_img((img_t *) img_out.get(), false) == 0) {
               // Copy the pixel buffer into the output image
-              std::copy_n((std::uint8_t *)img_info.pData, height * img_info.RowPitch, (std::uint8_t *)img_out.get()->data);
+              std::copy_n((std::uint8_t *) img_info.pData, height * img_info.RowPitch, (std::uint8_t *) img_out.get()->data);
 
               // Not the most accurate timestamp but better than none
-              ((img_t *)img_out.get())->frame_timestamp = std::chrono::steady_clock::now();
+              ((img_t *) img_out.get())->frame_timestamp = std::chrono::steady_clock::now();
             } else {
-              result = capture_e::error;
+              result = capture_e::capture_error;
             }
           } else {
             result = capture_e::interrupted;
@@ -258,10 +253,10 @@ namespace platf::dxgi {
             img_info.pData = nullptr;
           }
         } else {
-          result = capture_e::error;
+          result = capture_e::capture_error;
         }
       } else {
-        result = capture_e::error;
+        result = capture_e::capture_error;
       }
     }
 
@@ -270,7 +265,7 @@ namespace platf::dxgi {
   }
 
   std::shared_ptr<platf::img_t>
-  display_ram_t::alloc_img() {
+    display_ram_t::alloc_img() {
     auto img = std::make_shared<img_t>();
 
     // Initialize fields that are format-independent
@@ -280,8 +275,7 @@ namespace platf::dxgi {
     return img;
   }
 
-  int
-  display_ram_t::complete_img(platf::img_t *img, bool dummy) {
+  int display_ram_t::complete_img(platf::img_t *img, bool dummy) {
     // If this is not a dummy image, we must know the format by now
     if (!dummy && capture_format == DXGI_FORMAT_UNKNOWN) {
       BOOST_LOG(error) << "display_ram_t::complete_img() called with unknown capture format!";
@@ -309,8 +303,7 @@ namespace platf::dxgi {
     return 0;
   }
 
-  int
-  display_ram_t::dummy_img(platf::img_t *img) {
+  int display_ram_t::dummy_img(platf::img_t *img) {
     if (complete_img(img, true)) {
       return -1;
     }
@@ -320,12 +313,11 @@ namespace platf::dxgi {
   }
 
   std::vector<DXGI_FORMAT>
-  display_ram_t::get_supported_capture_formats() {
-    return { DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_B8G8R8X8_UNORM };
+    display_ram_t::get_supported_capture_formats() {
+    return {DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_B8G8R8X8_UNORM};
   }
 
-  int
-  display_ram_t::init(const ::video::config_t &config, const std::string &display_name) {
+  int display_ram_t::init(const ::video::config_t &config, const std::string &display_name) {
     if (display_base_t::init(config, display_name)) {
       return -1;
     }
@@ -334,7 +326,7 @@ namespace platf::dxgi {
   }
 
   std::unique_ptr<avcodec_encode_device_t>
-  display_ram_t::make_avcodec_encode_device(pix_fmt_e pix_fmt) {
+    display_ram_t::make_avcodec_encode_device(pix_fmt_e pix_fmt) {
     return std::make_unique<avcodec_encode_device_t>();
   }
 

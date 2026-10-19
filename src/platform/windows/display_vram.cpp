@@ -3,7 +3,6 @@
  * @brief Definitions for handling video ram.
  */
 #include <cmath>
-
 #include <d3dcompiler.h>
 #include <directxmath.h>
 
@@ -17,13 +16,11 @@ extern "C" {
 #include "src/config.h"
 #include "src/logging.h"
 #include "src/nvenc/nvenc_config.h"
-#include "src/nvenc/nvenc_d3d11_native.h"
-#include "src/nvenc/nvenc_d3d11_on_cuda.h"
-#include "src/nvenc/nvenc_utils.h"
+#include "src/nvenc/nvenc_dynamic_factory.h"
 #include "src/video.h"
+#include "utf_utils.h"
 
 #include <AMF/core/Factory.h>
-
 #include <boost/algorithm/string/predicate.hpp>
 
 #if !defined(SUNSHINE_SHADERS_DIR)  // for testing this needs to be defined in cmake as we don't do an install
@@ -34,7 +31,7 @@ namespace platf {
 }
 
 static void
-free_frame(AVFrame *frame) {
+  free_frame(AVFrame *frame) {
   av_frame_free(&frame);
 }
 
@@ -42,9 +39,9 @@ using frame_t = util::safe_ptr<AVFrame, free_frame>;
 
 namespace platf::dxgi {
 
-  template <class T>
+  template<class T>
   buf_t
-  make_buffer(device_t::pointer device, const T &t) {
+    make_buffer(device_t::pointer device, const T &t) {
     static_assert(sizeof(T) % 16 == 0, "Buffer needs to be aligned on a 16-byte alignment");
 
     D3D11_BUFFER_DESC buffer_desc {
@@ -64,11 +61,11 @@ namespace platf::dxgi {
       return nullptr;
     }
 
-    return buf_t { buf_p };
+    return buf_t {buf_p};
   }
 
   blend_t
-  make_blend(device_t::pointer device, bool enable, bool invert) {
+    make_blend(device_t::pointer device, bool enable, bool invert) {
     D3D11_BLEND_DESC bdesc {};
     auto &rt = bdesc.RenderTarget[0];
     rt.BlendEnable = enable;
@@ -82,8 +79,7 @@ namespace platf::dxgi {
         // Invert colors
         rt.SrcBlend = D3D11_BLEND_INV_DEST_COLOR;
         rt.DestBlend = D3D11_BLEND_INV_SRC_COLOR;
-      }
-      else {
+      } else {
         // Regular alpha blending
         rt.SrcBlend = D3D11_BLEND_SRC_ALPHA;
         rt.DestBlend = D3D11_BLEND_INV_SRC_ALPHA;
@@ -164,7 +160,7 @@ namespace platf::dxgi {
 
     texture_lock_helper(const texture_lock_helper &) = delete;
     texture_lock_helper &
-    operator=(const texture_lock_helper &) = delete;
+      operator=(const texture_lock_helper &) = delete;
 
     texture_lock_helper(texture_lock_helper &&other) {
       _mutex.reset(other._mutex.release());
@@ -173,8 +169,10 @@ namespace platf::dxgi {
     }
 
     texture_lock_helper &
-    operator=(texture_lock_helper &&other) {
-      if (_locked) _mutex->ReleaseSync(0);
+      operator=(texture_lock_helper &&other) {
+      if (_locked) {
+        _mutex->ReleaseSync(0);
+      }
       _mutex.reset(other._mutex.release());
       _locked = other._locked;
       other._locked = false;
@@ -183,21 +181,26 @@ namespace platf::dxgi {
 
     texture_lock_helper(IDXGIKeyedMutex *mutex):
         _mutex(mutex) {
-      if (_mutex) _mutex->AddRef();
+      if (_mutex) {
+        _mutex->AddRef();
+      }
     }
 
     ~texture_lock_helper() {
-      if (_locked) _mutex->ReleaseSync(0);
+      if (_locked) {
+        _mutex->ReleaseSync(0);
+      }
     }
 
     bool
-    lock() {
-      if (_locked) return true;
+      lock() {
+      if (_locked) {
+        return true;
+      }
       HRESULT status = _mutex->AcquireSync(0, INFINITE);
       if (status == S_OK) {
         _locked = true;
-      }
-      else {
+      } else {
         BOOST_LOG(error) << "Failed to acquire texture mutex [0x"sv << util::hex(status).to_string_view() << ']';
       }
       return _locked;
@@ -205,7 +208,7 @@ namespace platf::dxgi {
   };
 
   util::buffer_t<std::uint8_t>
-  make_cursor_xor_image(const util::buffer_t<std::uint8_t> &img_data, DXGI_OUTDUPL_POINTER_SHAPE_INFO shape_info) {
+    make_cursor_xor_image(const util::buffer_t<std::uint8_t> &img_data, DXGI_OUTDUPL_POINTER_SHAPE_INFO shape_info) {
     constexpr std::uint32_t inverted = 0xFFFFFFFF;
     constexpr std::uint32_t transparent = 0;
 
@@ -213,25 +216,24 @@ namespace platf::dxgi {
       case DXGI_OUTDUPL_POINTER_SHAPE_TYPE_COLOR:
         // This type doesn't require any XOR-blending
         return {};
-      case DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MASKED_COLOR: {
-        util::buffer_t<std::uint8_t> cursor_img = img_data;
-        std::for_each((std::uint32_t *) std::begin(cursor_img), (std::uint32_t *) std::end(cursor_img), [](auto &pixel) {
-          auto alpha = (std::uint8_t)((pixel >> 24) & 0xFF);
-          if (alpha == 0xFF) {
-            // Pixels with 0xFF alpha will be XOR-blended as is.
-          }
-          else if (alpha == 0x00) {
-            // Pixels with 0x00 alpha will be blended by make_cursor_alpha_image().
-            // We make them transparent for the XOR-blended cursor image.
-            pixel = transparent;
-          }
-          else {
-            // Other alpha values are illegal in masked color cursors
-            BOOST_LOG(warning) << "Illegal alpha value in masked color cursor: " << alpha;
-          }
-        });
-        return cursor_img;
-      }
+      case DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MASKED_COLOR:
+        {
+          util::buffer_t<std::uint8_t> cursor_img = img_data;
+          std::for_each((std::uint32_t *) std::begin(cursor_img), (std::uint32_t *) std::end(cursor_img), [](auto &pixel) {
+            auto alpha = (std::uint8_t) ((pixel >> 24) & 0xFF);
+            if (alpha == 0xFF) {
+              // Pixels with 0xFF alpha will be XOR-blended as is.
+            } else if (alpha == 0x00) {
+              // Pixels with 0x00 alpha will be blended by make_cursor_alpha_image().
+              // We make them transparent for the XOR-blended cursor image.
+              pixel = transparent;
+            } else {
+              // Other alpha values are illegal in masked color cursors
+              BOOST_LOG(warning) << "Illegal alpha value in masked color cursor: " << alpha;
+            }
+          });
+          return cursor_img;
+        }
       case DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MONOCHROME:
         // Monochrome is handled below
         break;
@@ -242,7 +244,7 @@ namespace platf::dxgi {
 
     shape_info.Height /= 2;
 
-    util::buffer_t<std::uint8_t> cursor_img { shape_info.Width * shape_info.Height * 4 };
+    util::buffer_t<std::uint8_t> cursor_img {shape_info.Width * shape_info.Height * 4};
 
     auto bytes = shape_info.Pitch * shape_info.Height;
     auto pixel_begin = (std::uint32_t *) std::begin(cursor_img);
@@ -276,32 +278,31 @@ namespace platf::dxgi {
   }
 
   util::buffer_t<std::uint8_t>
-  make_cursor_alpha_image(const util::buffer_t<std::uint8_t> &img_data, DXGI_OUTDUPL_POINTER_SHAPE_INFO shape_info) {
+    make_cursor_alpha_image(const util::buffer_t<std::uint8_t> &img_data, DXGI_OUTDUPL_POINTER_SHAPE_INFO shape_info) {
     constexpr std::uint32_t black = 0xFF000000;
     constexpr std::uint32_t white = 0xFFFFFFFF;
     constexpr std::uint32_t transparent = 0;
 
     switch (shape_info.Type) {
-      case DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MASKED_COLOR: {
-        util::buffer_t<std::uint8_t> cursor_img = img_data;
-        std::for_each((std::uint32_t *) std::begin(cursor_img), (std::uint32_t *) std::end(cursor_img), [](auto &pixel) {
-          auto alpha = (std::uint8_t)((pixel >> 24) & 0xFF);
-          if (alpha == 0xFF) {
-            // Pixels with 0xFF alpha will be XOR-blended by make_cursor_xor_image().
-            // We make them transparent for the alpha-blended cursor image.
-            pixel = transparent;
-          }
-          else if (alpha == 0x00) {
-            // Pixels with 0x00 alpha will be blended as opaque with the alpha-blended image.
-            pixel |= 0xFF000000;
-          }
-          else {
-            // Other alpha values are illegal in masked color cursors
-            BOOST_LOG(warning) << "Illegal alpha value in masked color cursor: " << alpha;
-          }
-        });
-        return cursor_img;
-      }
+      case DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MASKED_COLOR:
+        {
+          util::buffer_t<std::uint8_t> cursor_img = img_data;
+          std::for_each((std::uint32_t *) std::begin(cursor_img), (std::uint32_t *) std::end(cursor_img), [](auto &pixel) {
+            auto alpha = (std::uint8_t) ((pixel >> 24) & 0xFF);
+            if (alpha == 0xFF) {
+              // Pixels with 0xFF alpha will be XOR-blended by make_cursor_xor_image().
+              // We make them transparent for the alpha-blended cursor image.
+              pixel = transparent;
+            } else if (alpha == 0x00) {
+              // Pixels with 0x00 alpha will be blended as opaque with the alpha-blended image.
+              pixel |= 0xFF000000;
+            } else {
+              // Other alpha values are illegal in masked color cursors
+              BOOST_LOG(warning) << "Illegal alpha value in masked color cursor: " << alpha;
+            }
+          });
+          return cursor_img;
+        }
       case DXGI_OUTDUPL_POINTER_SHAPE_TYPE_COLOR:
         // Color cursors are just an ARGB bitmap which requires no processing.
         return img_data;
@@ -315,7 +316,7 @@ namespace platf::dxgi {
 
     shape_info.Height /= 2;
 
-    util::buffer_t<std::uint8_t> cursor_img { shape_info.Width * shape_info.Height * 4 };
+    util::buffer_t<std::uint8_t> cursor_img {shape_info.Width * shape_info.Height * 4};
 
     auto bytes = shape_info.Pitch * shape_info.Height;
     auto pixel_begin = (std::uint32_t *) std::begin(cursor_img);
@@ -351,7 +352,7 @@ namespace platf::dxgi {
   }
 
   blob_t
-  compile_shader(LPCSTR file, LPCSTR entrypoint, LPCSTR shader_model) {
+    compile_shader(LPCSTR file, LPCSTR entrypoint, LPCSTR shader_model) {
     blob_t::pointer msg_p = nullptr;
     blob_t::pointer compiled_p;
 
@@ -361,11 +362,11 @@ namespace platf::dxgi {
     flags |= D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION;
 #endif
 
-    auto wFile = from_utf8(file);
+    auto wFile = utf_utils::from_utf8(file);
     auto status = D3DCompileFromFile(wFile.c_str(), nullptr, D3D_COMPILE_STANDARD_FILE_INCLUDE, entrypoint, shader_model, flags, 0, &compiled_p, &msg_p);
 
     if (msg_p) {
-      BOOST_LOG(warning) << std::string_view { (const char *) msg_p->GetBufferPointer(), msg_p->GetBufferSize() - 1 };
+      BOOST_LOG(warning) << std::string_view {(const char *) msg_p->GetBufferPointer(), msg_p->GetBufferSize() - 1};
       msg_p->Release();
     }
 
@@ -374,29 +375,28 @@ namespace platf::dxgi {
       return nullptr;
     }
 
-    return blob_t { compiled_p };
+    return blob_t {compiled_p};
   }
 
   blob_t
-  compile_pixel_shader(LPCSTR file) {
+    compile_pixel_shader(LPCSTR file) {
     return compile_shader(file, "main_ps", "ps_5_0");
   }
 
   blob_t
-  compile_vertex_shader(LPCSTR file) {
+    compile_vertex_shader(LPCSTR file) {
     return compile_shader(file, "main_vs", "vs_5_0");
   }
 
   class d3d_base_encode_device final {
   public:
     int
-    convert(platf::img_t &img_base) {
+      convert(platf::img_t &img_base) {
       // Garbage collect mapped capture images whose weak references have expired
       for (auto it = img_ctx_map.begin(); it != img_ctx_map.end();) {
         if (it->second.img_weak.expired()) {
           it = img_ctx_map.erase(it);
-        }
-        else {
+        } else {
           it++;
         }
       }
@@ -443,7 +443,9 @@ namespace platf::dxgi {
         // Clear render target view(s) once so that the aspect ratio mismatch "bars" appear black
         if (!rtvs_cleared) {
           auto black = create_black_texture_for_rtv_clear();
-          if (black) draw(black, out_Y_or_YUV_viewports_for_clear, out_UV_viewport_for_clear);
+          if (black) {
+            draw(black, out_Y_or_YUV_viewports_for_clear, out_UV_viewport_for_clear);
+          }
           rtvs_cleared = true;
         }
 
@@ -461,13 +463,11 @@ namespace platf::dxgi {
     }
 
     void
-    apply_colorspace(const ::video::sunshine_colorspace_t &colorspace) {
-      auto color_vectors = ::video::color_vectors_from_colorspace(colorspace);
+      apply_colorspace(const ::video::sunshine_colorspace_t &colorspace) {
+      auto color_vectors = ::video::color_vectors_from_colorspace(colorspace, true);
 
-      if (format == DXGI_FORMAT_AYUV ||
-          format == DXGI_FORMAT_R16_UINT ||
-          format == DXGI_FORMAT_Y410) {
-        color_vectors = ::video::new_color_vectors_from_colorspace(colorspace);
+      if (format == DXGI_FORMAT_AYUV || format == DXGI_FORMAT_R16_UINT || format == DXGI_FORMAT_Y410) {
+        color_vectors = ::video::color_vectors_from_colorspace(colorspace, false);
       }
 
       if (!color_vectors) {
@@ -487,22 +487,22 @@ namespace platf::dxgi {
     }
 
     int
-    init_output(ID3D11Texture2D *frame_texture, int width, int height) {
+      init_output(ID3D11Texture2D *frame_texture, int width, int height) {
       // The underlying frame pool owns the texture, so we must reference it for ourselves
       frame_texture->AddRef();
       output_texture.reset(frame_texture);
 
       HRESULT status = S_OK;
 
-#define create_vertex_shader_helper(x, y)                                                                    \
+#define create_vertex_shader_helper(x, y) \
   if (FAILED(status = device->CreateVertexShader(x->GetBufferPointer(), x->GetBufferSize(), nullptr, &y))) { \
-    BOOST_LOG(error) << "Failed to create vertex shader " << #x << ": " << util::log_hex(status);            \
-    return -1;                                                                                               \
+    BOOST_LOG(error) << "Failed to create vertex shader " << #x << ": " << util::log_hex(status); \
+    return -1; \
   }
-#define create_pixel_shader_helper(x, y)                                                                    \
+#define create_pixel_shader_helper(x, y) \
   if (FAILED(status = device->CreatePixelShader(x->GetBufferPointer(), x->GetBufferSize(), nullptr, &y))) { \
-    BOOST_LOG(error) << "Failed to create pixel shader " << #x << ": " << util::log_hex(status);            \
-    return -1;                                                                                              \
+    BOOST_LOG(error) << "Failed to create pixel shader " << #x << ": " << util::log_hex(status); \
+    return -1; \
   }
 
       const bool downscaling = display->width > width || display->height > height;
@@ -559,8 +559,7 @@ namespace platf::dxgi {
             } else {
               create_pixel_shader_helper(convert_yuv420_packed_uv_type0s_ps_linear_hlsl, convert_UV_fp16_ps);
             }
-          }
-          else {
+          } else {
             create_vertex_shader_helper(convert_yuv420_packed_uv_type0_vs_hlsl, convert_UV_vs);
             create_pixel_shader_helper(convert_yuv420_packed_uv_type0_ps_hlsl, convert_UV_ps);
             if (display->is_hdr()) {
@@ -636,22 +635,22 @@ namespace platf::dxgi {
       auto offsetX = (out_width - out_width_f) / 2;
       auto offsetY = (out_height - out_height_f) / 2;
 
-      out_Y_or_YUV_viewports[0] = { offsetX, offsetY, out_width_f, out_height_f, 0.0f, 1.0f };  // Y plane
+      out_Y_or_YUV_viewports[0] = {offsetX, offsetY, out_width_f, out_height_f, 0.0f, 1.0f};  // Y plane
       out_Y_or_YUV_viewports[1] = out_Y_or_YUV_viewports[0];  // U plane
       out_Y_or_YUV_viewports[1].TopLeftY += out_height;
       out_Y_or_YUV_viewports[2] = out_Y_or_YUV_viewports[1];  // V plane
       out_Y_or_YUV_viewports[2].TopLeftY += out_height;
 
-      out_Y_or_YUV_viewports_for_clear[0] = { 0, 0, (float) out_width, (float) out_height, 0.0f, 1.0f };  // Y plane
+      out_Y_or_YUV_viewports_for_clear[0] = {0, 0, (float) out_width, (float) out_height, 0.0f, 1.0f};  // Y plane
       out_Y_or_YUV_viewports_for_clear[1] = out_Y_or_YUV_viewports_for_clear[0];  // U plane
       out_Y_or_YUV_viewports_for_clear[1].TopLeftY += out_height;
       out_Y_or_YUV_viewports_for_clear[2] = out_Y_or_YUV_viewports_for_clear[1];  // V plane
       out_Y_or_YUV_viewports_for_clear[2].TopLeftY += out_height;
 
-      out_UV_viewport = { offsetX / 2, offsetY / 2, out_width_f / 2, out_height_f / 2, 0.0f, 1.0f };
-      out_UV_viewport_for_clear = { 0, 0, (float) out_width / 2, (float) out_height / 2, 0.0f, 1.0f };
+      out_UV_viewport = {offsetX / 2, offsetY / 2, out_width_f / 2, out_height_f / 2, 0.0f, 1.0f};
+      out_UV_viewport_for_clear = {0, 0, (float) out_width / 2, (float) out_height / 2, 0.0f, 1.0f};
 
-      float subsample_offset_in[16 / sizeof(float)] { 1.0f / (float) out_width_f, 1.0f / (float) out_height_f };  // aligned to 16-byte
+      float subsample_offset_in[16 / sizeof(float)] {1.0f / (float) out_width_f, 1.0f / (float) out_height_f};  // aligned to 16-byte
       subsample_offset = make_buffer(device.get(), subsample_offset_in);
 
       if (!subsample_offset) {
@@ -662,7 +661,7 @@ namespace platf::dxgi {
 
       {
         int32_t rotation_modifier = display->display_rotation == DXGI_MODE_ROTATION_UNSPECIFIED ? 0 : display->display_rotation - 1;
-        int32_t rotation_data[16 / sizeof(int32_t)] { -rotation_modifier };  // aligned to 16-byte
+        int32_t rotation_data[16 / sizeof(int32_t)] {-rotation_modifier};  // aligned to 16-byte
         auto rotation = make_buffer(device.get(), rotation_data);
         if (!rotation) {
           BOOST_LOG(error) << "Failed to create display rotation vertex constant buffer";
@@ -720,22 +719,25 @@ namespace platf::dxgi {
       };
 
       // Create Y/YUV render target view
-      if (!create_rtv(out_Y_or_YUV_rtv, rtv_Y_or_YUV_format)) return -1;
+      if (!create_rtv(out_Y_or_YUV_rtv, rtv_Y_or_YUV_format)) {
+        return -1;
+      }
 
       // Create UV render target view if needed
-      if (rtv_UV_format != DXGI_FORMAT_UNKNOWN && !create_rtv(out_UV_rtv, rtv_UV_format)) return -1;
+      if (rtv_UV_format != DXGI_FORMAT_UNKNOWN && !create_rtv(out_UV_rtv, rtv_UV_format)) {
+        return -1;
+      }
 
       if (rtv_simple_clear) {
         // Clear the RTVs to ensure the aspect ratio padding is black
-        const float y_black[] = { 0.0f, 0.0f, 0.0f, 0.0f };
+        const float y_black[] = {0.0f, 0.0f, 0.0f, 0.0f};
         device_ctx->ClearRenderTargetView(out_Y_or_YUV_rtv.get(), y_black);
         if (out_UV_rtv) {
-          const float uv_black[] = { 0.5f, 0.5f, 0.5f, 0.5f };
+          const float uv_black[] = {0.5f, 0.5f, 0.5f, 0.5f};
           device_ctx->ClearRenderTargetView(out_UV_rtv.get(), uv_black);
         }
         rtvs_cleared = true;
-      }
-      else {
+      } else {
         // Can't use ClearRenderTargetView(), will clear on first convert()
         rtvs_cleared = false;
       }
@@ -744,7 +746,7 @@ namespace platf::dxgi {
     }
 
     int
-    init(std::shared_ptr<platf::display_t> display, adapter_t::pointer adapter_p, pix_fmt_e pix_fmt) {
+      init(std::shared_ptr<platf::display_t> display, adapter_t::pointer adapter_p, pix_fmt_e pix_fmt) {
       switch (pix_fmt) {
         case pix_fmt_e::nv12:
           format = DXGI_FORMAT_NV12;
@@ -786,11 +788,13 @@ namespace platf::dxgi {
         D3D_DRIVER_TYPE_UNKNOWN,
         nullptr,
         D3D11_CREATE_DEVICE_FLAGS,
-        featureLevels, sizeof(featureLevels) / sizeof(D3D_FEATURE_LEVEL),
+        featureLevels,
+        sizeof(featureLevels) / sizeof(D3D_FEATURE_LEVEL),
         D3D11_SDK_VERSION,
         &device,
         nullptr,
-        &device_ctx);
+        &device_ctx
+      );
 
       if (FAILED(status)) {
         BOOST_LOG(error) << "Failed to create encoder D3D11 device [0x"sv << util::hex(status).to_string_view() << ']';
@@ -809,7 +813,7 @@ namespace platf::dxgi {
         BOOST_LOG(warning) << "Failed to increase encoding GPU thread priority. Please run application as administrator for optimal performance.";
       }
 
-      auto default_color_vectors = ::video::color_vectors_from_colorspace(::video::colorspace_e::rec601, false);
+      auto default_color_vectors = ::video::color_vectors_from_colorspace({::video::colorspace_e::rec601, false, 8}, true);
       if (!default_color_vectors) {
         BOOST_LOG(error) << "Missing color vectors for Rec. 601"sv;
         return -1;
@@ -868,7 +872,7 @@ namespace platf::dxgi {
       std::weak_ptr<const platf::img_t> img_weak;
 
       void
-      reset() {
+        reset() {
         capture_texture_p = nullptr;
         encoder_texture.reset();
         encoder_input_res.reset();
@@ -878,7 +882,7 @@ namespace platf::dxgi {
     };
 
     int
-    initialize_image_context(const img_d3d_t &img, encoder_img_ctx_t &img_ctx) {
+      initialize_image_context(const img_d3d_t &img, encoder_img_ctx_t &img_ctx) {
       // If we've already opened the shared texture, we're done
       if (img_ctx.encoder_texture && img.capture_texture.get() == img_ctx.capture_texture_p) {
         return 0;
@@ -924,7 +928,7 @@ namespace platf::dxgi {
     }
 
     shader_res_t
-    create_black_texture_for_rtv_clear() {
+      create_black_texture_for_rtv_clear() {
       constexpr auto width = 32;
       constexpr auto height = 32;
 
@@ -939,7 +943,7 @@ namespace platf::dxgi {
       texture_desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
 
       std::vector<uint8_t> mem(4 * width * height, 0);
-      D3D11_SUBRESOURCE_DATA texture_data = { mem.data(), 4 * width, 0 };
+      D3D11_SUBRESOURCE_DATA texture_data = {mem.data(), 4 * width, 0};
 
       texture2d_t texture;
       auto status = device->CreateTexture2D(&texture_desc, &texture_data, &texture);
@@ -1000,24 +1004,24 @@ namespace platf::dxgi {
   class d3d_avcodec_encode_device_t: public avcodec_encode_device_t {
   public:
     int
-    init(std::shared_ptr<platf::display_t> display, adapter_t::pointer adapter_p, pix_fmt_e pix_fmt) {
+      init(std::shared_ptr<platf::display_t> display, adapter_t::pointer adapter_p, pix_fmt_e pix_fmt) {
       int result = base.init(display, adapter_p, pix_fmt);
-      data = base.device.get();
+      d3d11_device = base.device.get();
       return result;
     }
 
     int
-    convert(platf::img_t &img_base) override {
+      convert(platf::img_t &img_base) override {
       return base.convert(img_base);
     }
 
     void
-    apply_colorspace() override {
+      apply_colorspace() override {
       base.apply_colorspace(colorspace);
     }
 
     void
-    init_hwframes(AVHWFramesContext *frames) override {
+      init_hwframes(AVHWFramesContext *frames) override {
       // We may be called with a QSV or D3D11VA context
       if (frames->device_ctx->type == AV_HWDEVICE_TYPE_D3D11VA) {
         auto d3d11_frames = (AVD3D11VAFramesContext *) frames->hwctx;
@@ -1032,7 +1036,7 @@ namespace platf::dxgi {
     }
 
     int
-    prepare_to_derive_context(int hw_device_type) override {
+      prepare_to_derive_context(int hw_device_type) override {
       // QuickSync requires our device to be multithread-protected
       if (hw_device_type == AV_HWDEVICE_TYPE_QSV) {
         multithread_t mt;
@@ -1050,7 +1054,7 @@ namespace platf::dxgi {
     }
 
     int
-    set_frame(AVFrame *frame, AVBufferRef *hw_frames_ctx) override {
+      set_frame(AVFrame *frame, AVBufferRef *hw_frames_ctx) override {
       this->hwframe.reset(frame);
       this->frame = frame;
 
@@ -1058,7 +1062,7 @@ namespace platf::dxgi {
       if (!frame->buf[0]) {
         auto err = av_hwframe_get_buffer(hw_frames_ctx, frame, 0);
         if (err) {
-          char err_str[AV_ERROR_MAX_STRING_SIZE] { 0 };
+          char err_str[AV_ERROR_MAX_STRING_SIZE] {0};
           BOOST_LOG(error) << "Failed to get hwframe buffer: "sv << av_make_error_string(err_str, AV_ERROR_MAX_STRING_SIZE, err);
           return -1;
         }
@@ -1067,21 +1071,20 @@ namespace platf::dxgi {
       // If this is a frame from a derived context, we'll need to map it to D3D11
       ID3D11Texture2D *frame_texture;
       if (frame->format != AV_PIX_FMT_D3D11) {
-        frame_t d3d11_frame { av_frame_alloc() };
+        frame_t d3d11_frame {av_frame_alloc()};
 
         d3d11_frame->format = AV_PIX_FMT_D3D11;
 
         auto err = av_hwframe_map(d3d11_frame.get(), frame, AV_HWFRAME_MAP_WRITE | AV_HWFRAME_MAP_OVERWRITE);
         if (err) {
-          char err_str[AV_ERROR_MAX_STRING_SIZE] { 0 };
+          char err_str[AV_ERROR_MAX_STRING_SIZE] {0};
           BOOST_LOG(error) << "Failed to map D3D11 frame: "sv << av_make_error_string(err_str, AV_ERROR_MAX_STRING_SIZE, err);
           return -1;
         }
 
         // Get the texture from the mapped frame
         frame_texture = (ID3D11Texture2D *) d3d11_frame->data[0];
-      }
-      else {
+      } else {
         // Otherwise, we can just use the texture inside the original frame
         frame_texture = (ID3D11Texture2D *) frame->data[0];
       }
@@ -1094,53 +1097,85 @@ namespace platf::dxgi {
     frame_t hwframe;
   };
 
+  /**
+   * @brief D3D11 encode device that exposes captured textures to NVENC.
+   */
   class d3d_nvenc_encode_device_t: public nvenc_encode_device_t {
   public:
+    /**
+     * @brief Create D3D11 and NVENC resources for texture-based encoding.
+     *
+     * @param display Display object or identifier associated with the operation.
+     * @param adapter_p Adapter p.
+     * @param pix_fmt Sunshine pixel format to convert or allocate for.
+     * @return True when the D3D11 device resources are initialized.
+     */
     bool
-    init_device(std::shared_ptr<platf::display_t> display, adapter_t::pointer adapter_p, pix_fmt_e pix_fmt) {
-      buffer_format = nvenc::nvenc_format_from_sunshine_format(pix_fmt);
-      if (buffer_format == NV_ENC_BUFFER_FORMAT_UNDEFINED) {
-        BOOST_LOG(error) << "Unexpected pixel format for NvENC ["sv << from_pix_fmt(pix_fmt) << ']';
+      init_device(std::shared_ptr<platf::display_t> display, adapter_t::pointer adapter_p, pix_fmt_e pix_fmt) {
+      if (base.init(display, adapter_p, pix_fmt)) {
         return false;
       }
 
-      if (base.init(display, adapter_p, pix_fmt)) return false;
+      auto factory = nvenc::nvenc_dynamic_factory::get();
+      if (!factory) {
+        return false;
+      }
 
       if (pix_fmt == pix_fmt_e::yuv444p16) {
-        nvenc_d3d = std::make_unique<nvenc::nvenc_d3d11_on_cuda>(base.device.get());
+        nvenc_d3d = factory->create_nvenc_d3d11_on_cuda(base.device.get());
+      } else {
+        nvenc_d3d = factory->create_nvenc_d3d11_native(base.device.get());
       }
-      else {
-        nvenc_d3d = std::make_unique<nvenc::nvenc_d3d11_native>(base.device.get());
+      if (!nvenc_d3d) {
+        return false;
       }
+
+      buffer_format = pix_fmt;
       nvenc = nvenc_d3d.get();
 
       return true;
     }
 
+    /**
+     * @brief Initialize the platform encoder for the client stream configuration.
+     *
+     * @param client_config Client stream configuration negotiated for this session.
+     * @param encoder_colorspace Colorimetry information used for conversion or encoding.
+     * @return True when the NVENC encoder initializes for the client configuration.
+     */
     bool
-    init_encoder(const ::video::config_t &client_config, const ::video::sunshine_colorspace_t &colorspace) override {
-      if (!nvenc_d3d) return false;
+      init_encoder(const ::video::config_t &client_config, const ::video::sunshine_colorspace_t &encoder_colorspace) override {
+      if (!nvenc_d3d) {
+        return false;
+      }
 
-      auto nvenc_colorspace = nvenc::nvenc_colorspace_from_sunshine_colorspace(colorspace);
-      if (!nvenc_d3d->create_encoder(config::video.nv, client_config, nvenc_colorspace, buffer_format)) return false;
+      if (!nvenc_d3d->create_encoder(config::video.nv, client_config, encoder_colorspace, buffer_format)) {
+        return false;
+      }
 
-      base.apply_colorspace(colorspace);
+      base.apply_colorspace(encoder_colorspace);
       return base.init_output(nvenc_d3d->get_input_texture(), client_config.width, client_config.height) == 0;
     }
 
+    /**
+     * @brief Convert a captured D3D texture for NVENC encoding.
+     *
+     * @param img_base D3D image supplied by the capture backend.
+     * @return Conversion status.
+     */
     int
-    convert(platf::img_t &img_base) override {
+      convert(platf::img_t &img_base) override {
       return base.convert(img_base);
     }
 
   private:
     d3d_base_encode_device base;
-    std::unique_ptr<nvenc::nvenc_d3d11> nvenc_d3d;
-    NV_ENC_BUFFER_FORMAT buffer_format = NV_ENC_BUFFER_FORMAT_UNDEFINED;
+    std::unique_ptr<nvenc::nvenc_d3d11_interface> nvenc_d3d;
+    platf::pix_fmt_e buffer_format = platf::pix_fmt_e::unknown;
   };
 
   bool
-  set_cursor_texture(device_t::pointer device, gpu_cursor_t &cursor, util::buffer_t<std::uint8_t> &&cursor_img, DXGI_OUTDUPL_POINTER_SHAPE_INFO &shape_info) {
+    set_cursor_texture(device_t::pointer device, gpu_cursor_t &cursor, util::buffer_t<std::uint8_t> &&cursor_img, DXGI_OUTDUPL_POINTER_SHAPE_INFO &shape_info) {
     // This cursor image may not be used
     if (cursor_img.size() == 0) {
       cursor.input_res.reset();
@@ -1185,39 +1220,40 @@ namespace platf::dxgi {
   }
 
   capture_e
-  display_vram_t::snapshot(const pull_free_image_cb_t &pull_free_image_cb, std::shared_ptr<platf::img_t> &img_out, std::chrono::milliseconds timeout, bool cursor_visible) {
+    display_vram_t::snapshot(const pull_free_image_cb_t &pull_free_image_cb, std::shared_ptr<platf::img_t> &img_out, std::chrono::milliseconds timeout, bool cursor_visible) {
     auto get_locked_d3d_img = [&](std::shared_ptr<platf::img_t> &img, bool dummy = false) -> std::tuple<std::shared_ptr<img_d3d_t>, texture_lock_helper> {
       auto d3d_img = std::static_pointer_cast<img_d3d_t>(img);
 
       // Finish creating the image (if it hasn't happened already),
       // also creates synchronization primitives for shared access from multiple direct3d devices.
-      if (complete_img(d3d_img.get(), dummy)) return { nullptr, nullptr };
+      if (complete_img(d3d_img.get(), dummy)) {
+        return {nullptr, nullptr};
+      }
 
       // This image is shared between capture direct3d device and encoders direct3d devices,
       // we must acquire lock before doing anything to it.
       texture_lock_helper lock_helper(d3d_img->capture_mutex.get());
       if (!lock_helper.lock()) {
         BOOST_LOG(error) << "Failed to lock capture texture";
-        return { nullptr, nullptr };
+        return {nullptr, nullptr};
       }
 
       // Clear the blank flag now that we're ready to capture into the image
       d3d_img->blank = false;
 
-      return { std::move(d3d_img), std::move(lock_helper) };
+      return {std::move(d3d_img), std::move(lock_helper)};
     };
 
     // Get the shared framebuffer texture
-    ID3D11Resource* iddTexture = NULL;
+    ID3D11Resource *iddTexture = NULL;
     capture_e result = dup.iddblt(device.get(), &iddTexture);
     if (result == capture_e::ok) {
       // We haven't determined the capture format yet
       if (capture_format == DXGI_FORMAT_UNKNOWN) {
         // Query the ID3D11Texture2D interface of the resource
-        ID3D11Texture2D* iddTexture2D = nullptr;
-        HRESULT hr = iddTexture->QueryInterface(__uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&iddTexture2D));
-        if (SUCCEEDED(hr))
-        {
+        ID3D11Texture2D *iddTexture2D = nullptr;
+        HRESULT hr = iddTexture->QueryInterface(__uuidof(ID3D11Texture2D), reinterpret_cast<void **>(&iddTexture2D));
+        if (SUCCEEDED(hr)) {
           // Get the texture description
           D3D11_TEXTURE2D_DESC desc;
           iddTexture2D->GetDesc(&desc);
@@ -1248,10 +1284,10 @@ namespace platf::dxgi {
           img_out = img;
 
           // Not the most accurate timestamp but better than none
-          ((img_t *)img_out.get())->frame_timestamp = std::chrono::steady_clock::now();
+          ((img_t *) img_out.get())->frame_timestamp = std::chrono::steady_clock::now();
         } else {
           // We failed to acquire exclusive access to the image structure
-          result = capture_e::error;
+          result = capture_e::capture_error;
         }
       } else {
         // No free image available
@@ -1263,8 +1299,7 @@ namespace platf::dxgi {
     return result;
   }
 
-  int
-  display_vram_t::init(const ::video::config_t &config, const std::string &display_name) {
+  int display_vram_t::init(const ::video::config_t &config, const std::string &display_name) {
     if (display_base_t::init(config, display_name)) {
       return -1;
     }
@@ -1292,7 +1327,7 @@ namespace platf::dxgi {
 
     {
       int32_t rotation_modifier = display_rotation == DXGI_MODE_ROTATION_UNSPECIFIED ? 0 : display_rotation - 1;
-      int32_t rotation_data[16 / sizeof(int32_t)] { rotation_modifier };  // aligned to 16-byte
+      int32_t rotation_data[16 / sizeof(int32_t)] {rotation_modifier};  // aligned to 16-byte
       auto rotation = make_buffer(device.get(), rotation_data);
       if (!rotation) {
         BOOST_LOG(error) << "Failed to create display rotation vertex constant buffer";
@@ -1312,7 +1347,7 @@ namespace platf::dxgi {
       // Use a 300 nit target for the mouse cursor. We should really get
       // the user's SDR white level in nits, but there is no API that
       // provides that information to Win32 apps.
-      float white_multiplier_data[16 / sizeof(float)] { 300.0f / 80.f };  // aligned to 16-byte
+      float white_multiplier_data[16 / sizeof(float)] {300.0f / 80.f};  // aligned to 16-byte
       auto white_multiplier = make_buffer(device.get(), white_multiplier_data);
       if (!white_multiplier) {
         BOOST_LOG(warning) << "Failed to create cursor blending (normalized white) white multiplier constant buffer";
@@ -1320,8 +1355,7 @@ namespace platf::dxgi {
       }
 
       device_ctx->PSSetConstantBuffers(1, 1, &white_multiplier);
-    }
-    else {
+    } else {
       status = device->CreatePixelShader(cursor_ps_hlsl->GetBufferPointer(), cursor_ps_hlsl->GetBufferSize(), nullptr, &cursor_ps);
       if (status) {
         BOOST_LOG(error) << "Failed to create cursor blending pixel shader [0x"sv << util::hex(status).to_string_view() << ']';
@@ -1345,7 +1379,7 @@ namespace platf::dxgi {
   }
 
   std::shared_ptr<platf::img_t>
-  display_vram_t::alloc_img() {
+    display_vram_t::alloc_img() {
     auto img = std::make_shared<img_d3d_t>();
 
     // Initialize format-independent fields
@@ -1358,8 +1392,7 @@ namespace platf::dxgi {
   }
 
   // This cannot use ID3D11DeviceContext because it can be called concurrently by the encoding thread
-  int
-  display_vram_t::complete_img(platf::img_t *img_base, bool dummy) {
+  int display_vram_t::complete_img(platf::img_t *img_base, bool dummy) {
     auto img = (img_d3d_t *) img_base;
 
     // If this already has a capture texture and it's not switching dummy state, nothing to do
@@ -1439,13 +1472,12 @@ namespace platf::dxgi {
   }
 
   // This cannot use ID3D11DeviceContext because it can be called concurrently by the encoding thread
-  int
-  display_vram_t::dummy_img(platf::img_t *img_base) {
+  int display_vram_t::dummy_img(platf::img_t *img_base) {
     return complete_img(img_base, true);
   }
 
   std::vector<DXGI_FORMAT>
-  display_vram_t::get_supported_capture_formats() {
+    display_vram_t::get_supported_capture_formats() {
     return {
       // scRGB FP16 is the ideal format for Wide Color Gamut and Advanced Color
       // displays (both SDR and HDR). This format uses linear gamma, so we will
@@ -1476,7 +1508,7 @@ namespace platf::dxgi {
    * @return `true` if supported, `false` otherwise.
    */
   bool
-  display_vram_t::is_codec_supported(std::string_view name, const ::video::config_t &config) {
+    display_vram_t::is_codec_supported(std::string_view name, const ::video::config_t &config) {
     DXGI_ADAPTER_DESC adapter_desc;
     adapter->GetDesc(&adapter_desc);
 
@@ -1509,8 +1541,7 @@ namespace platf::dxgi {
                                  << AMF_GET_BUILD_VERSION(version);
               BOOST_LOG(warning) << "If your AMD GPU supports AV1 encoding, update your graphics drivers!"sv;
               return false;
-            }
-            else if (config.dynamicRange && version < AMF_MAKE_FULL_VERSION(1, 4, 23, 0)) {
+            } else if (config.dynamicRange && version < AMF_MAKE_FULL_VERSION(1, 4, 23, 0)) {
               // Older versions of the AMD AMF runtime can crash when fed P010 surfaces.
               // Fail if AMF version is below 1.4.23 where HEVC Main10 encoding was introduced.
               // AMF 1.4.23 corresponds to driver version 21.12.1 (21.40.11.03) or newer.
@@ -1522,20 +1553,16 @@ namespace platf::dxgi {
               BOOST_LOG(warning) << "If your AMD GPU supports HEVC Main10 encoding, update your graphics drivers!"sv;
               return false;
             }
-          }
-          else {
+          } else {
             BOOST_LOG(warning) << "AMFQueryVersion() failed: "sv << result;
           }
-        }
-        else {
+        } else {
           BOOST_LOG(warning) << "AMF DLL missing export: "sv << AMF_QUERY_VERSION_FUNCTION_NAME;
         }
-      }
-      else {
+      } else {
         BOOST_LOG(warning) << "Detected AMD GPU but AMF failed to load"sv;
       }
-    }
-    else if (adapter_desc.VendorId == 0x8086) {  // Intel
+    } else if (adapter_desc.VendorId == 0x8086) {  // Intel
       // If it's not a QSV encoder, it's not compatible with an Intel GPU
       if (!boost::algorithm::ends_with(name, "_qsv")) {
         return false;
@@ -1547,14 +1574,12 @@ namespace platf::dxgi {
         }
         // TODO: Blacklist HEVC 4:4:4 based on adapter model
       }
-    }
-    else if (adapter_desc.VendorId == 0x10de) {  // Nvidia
+    } else if (adapter_desc.VendorId == 0x10de) {  // Nvidia
       // If it's not an NVENC encoder, it's not compatible with an Nvidia GPU
       if (!boost::algorithm::ends_with(name, "_nvenc")) {
         return false;
       }
-    }
-    else {
+    } else {
       BOOST_LOG(warning) << "Unknown GPU vendor ID: " << util::hex(adapter_desc.VendorId).to_string_view();
     }
 
@@ -1562,7 +1587,7 @@ namespace platf::dxgi {
   }
 
   std::unique_ptr<avcodec_encode_device_t>
-  display_vram_t::make_avcodec_encode_device(pix_fmt_e pix_fmt) {
+    display_vram_t::make_avcodec_encode_device(pix_fmt_e pix_fmt) {
     auto device = std::make_unique<d3d_avcodec_encode_device_t>();
     if (device->init(shared_from_this(), adapter.get(), pix_fmt) != 0) {
       return nullptr;
@@ -1571,7 +1596,7 @@ namespace platf::dxgi {
   }
 
   std::unique_ptr<nvenc_encode_device_t>
-  display_vram_t::make_nvenc_encode_device(pix_fmt_e pix_fmt) {
+    display_vram_t::make_nvenc_encode_device(pix_fmt_e pix_fmt) {
     auto device = std::make_unique<d3d_nvenc_encode_device_t>();
     if (!device->init_device(shared_from_this(), adapter.get(), pix_fmt)) {
       return nullptr;
@@ -1579,14 +1604,15 @@ namespace platf::dxgi {
     return device;
   }
 
-  int
-  init() {
+  int init() {
     BOOST_LOG(info) << "Compiling shaders..."sv;
 
 #define compile_vertex_shader_helper(x) \
-  if (!(x##_hlsl = compile_vertex_shader(SUNSHINE_SHADERS_DIR "/" #x ".hlsl"))) return -1;
+  if (!(x##_hlsl = compile_vertex_shader(SUNSHINE_SHADERS_DIR "/" #x ".hlsl"))) \
+    return -1;
 #define compile_pixel_shader_helper(x) \
-  if (!(x##_hlsl = compile_pixel_shader(SUNSHINE_SHADERS_DIR "/" #x ".hlsl"))) return -1;
+  if (!(x##_hlsl = compile_pixel_shader(SUNSHINE_SHADERS_DIR "/" #x ".hlsl"))) \
+    return -1;
 
     compile_pixel_shader_helper(convert_yuv420_packed_uv_type0_ps);
     compile_pixel_shader_helper(convert_yuv420_packed_uv_type0_ps_linear);

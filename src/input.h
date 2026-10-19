@@ -68,14 +68,6 @@ namespace input {
   bool probe_gamepads();
 
   /**
-   * @brief Recreate shared libvirtualhid keyboard and mouse devices after a license-state change.
-   *
-   * The work is serialized with streamed input so both backends can switch
-   * safely between the Windows HID and SendInput paths.
-   */
-  void refresh_virtual_input();
-
-  /**
    * @brief Allocate and initialize platform input state for a stream.
    *
    * @param mail Mailbox used to exchange messages with worker threads.

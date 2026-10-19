@@ -8,7 +8,10 @@
 #include <Windows.h>
 
 // standard includes
+#include <algorithm>
+#include <array>
 #include <cmath>
+#include <optional>
 #include <thread>
 
 // local includes
@@ -27,8 +30,7 @@ WINUSERAPI VOID WINAPI DestroySyntheticPointerDevice(HSYNTHETICPOINTERDEVICE dev
 /**
  * @brief The supported controller types.
  */
-typedef enum _DUO_CONTROLLER_TYPE
-{
+typedef enum _DUO_CONTROLLER_TYPE {
   DuoControllerTypeXbox = 0,
   DuoControllerTypeDualShock4 = 1,
   DuoControllerTypeDualSense = 2,
@@ -38,8 +40,7 @@ typedef enum _DUO_CONTROLLER_TYPE
 /**
  * @brief The populated fields in the output report.
  */
-typedef enum _SYNTHETIC_CONTROLLER_OUTPUT_REPORT_FLAGS
-{
+typedef enum _SYNTHETIC_CONTROLLER_OUTPUT_REPORT_FLAGS {
   SYNTHETIC_CONTROLLER_OUTPUT_REPORT_FLAG_RIGHT_MOTOR_VALID = 0x1,
   SYNTHETIC_CONTROLLER_OUTPUT_REPORT_FLAG_LEFT_MOTOR_VALID = 0x2,
   SYNTHETIC_CONTROLLER_OUTPUT_REPORT_FLAG_RIGHT_TRIGGER_VALID = 0x4,
@@ -50,22 +51,21 @@ typedef enum _SYNTHETIC_CONTROLLER_OUTPUT_REPORT_FLAGS
  * The power state of the DualSense controller's battery.
  */
 typedef enum _POWER_STATE {
-  Discharging = 0x00, // Use PowerPercent
-  Charging = 0x01, // Use PowerPercent
-  Complete = 0x02, // PowerPercent not valid? assume 100%?
-  AbnormalVoltage = 0x0A, // PowerPercent not valid?
-  AbnormalTemperature = 0x0B, // PowerPercent not valid?
+  Discharging = 0x00,  // Use PowerPercent
+  Charging = 0x01,  // Use PowerPercent
+  Complete = 0x02,  // PowerPercent not valid? assume 100%?
+  AbnormalVoltage = 0x0A,  // PowerPercent not valid?
+  AbnormalTemperature = 0x0B,  // PowerPercent not valid?
   ChargingError = 0x0F  // PowerPercent not valid?
 } POWER_STATE;
 
-#pragma pack(push, 1)
+  #pragma pack(push, 1)
 
 /**
  * @brief The Xbox controller input report structure.
  */
-typedef struct _DUO_CONTROLLER_INPUT_REPORT_XBOX
-{
-  UINT8 Sync : 1; // Unused
+typedef struct _DUO_CONTROLLER_INPUT_REPORT_XBOX {
+  UINT8 Sync : 1;  // Unused
   UINT8 Guide : 1;
   UINT8 Start : 1;
   UINT8 Back : 1;
@@ -75,27 +75,26 @@ typedef struct _DUO_CONTROLLER_INPUT_REPORT_XBOX
   UINT8 X : 1;
   UINT8 Y : 1;
 
-  UINT8 DPad : 4; // 0=None, 1=North, 2=Northeast, ..., 8=Northwest (clockwise)
+  UINT8 DPad : 4;  // 0=None, 1=North, 2=Northeast, ..., 8=Northwest (clockwise)
 
   UINT8 LeftBumper : 1;
   UINT8 RightBumper : 1;
   UINT8 LeftStick : 1;
   UINT8 RightStick : 1;
 
-  UINT8 LeftTrigger; // Analog 0-255
-  UINT8 RightTrigger; // Analog 0-255
+  UINT8 LeftTrigger;  // Analog 0-255
+  UINT8 RightTrigger;  // Analog 0-255
 
-  UINT16 LeftStickHorizontal; // 0 (far left) to 65535 (far right)
-  UINT16 LeftStickVertical;   // 0 (far top) to 65535 (far bottom)
-  UINT16 RightStickHorizontal; // 0 (far left) to 65535 (far right)
-  UINT16 RightStickVertical; // 0 (far top) to 65535 (far bottom)
+  UINT16 LeftStickHorizontal;  // 0 (far left) to 65535 (far right)
+  UINT16 LeftStickVertical;  // 0 (far top) to 65535 (far bottom)
+  UINT16 RightStickHorizontal;  // 0 (far left) to 65535 (far right)
+  UINT16 RightStickVertical;  // 0 (far top) to 65535 (far bottom)
 } DUO_CONTROLLER_INPUT_REPORT_XBOX;
 
 /**
  * Touch finger data for a single touch point. Bit-packed per DualSense wire format (4 bytes).
  */
-typedef struct _DS_TOUCH_FINGER_DATA
-{
+typedef struct _DS_TOUCH_FINGER_DATA {
   UINT32 Index : 7;
   UINT32 NotTouching : 1;
   UINT32 FingerX : 12;
@@ -105,8 +104,7 @@ typedef struct _DS_TOUCH_FINGER_DATA
 /**
  * @brief Touch data block from DualSense input report (9 bytes = 2 finger records + timestamp).
  */
-typedef struct _DS_TOUCH_DATA
-{
+typedef struct _DS_TOUCH_DATA {
   DS_TOUCH_FINGER_DATA Finger[2];
   UINT8 Timestamp;
 } DS_TOUCH_DATA;
@@ -114,8 +112,7 @@ typedef struct _DS_TOUCH_DATA
 /**
  * @brief The DualSense Edge controller input report structure.
  */
-typedef struct _DUO_CONTROLLER_INPUT_REPORT_DS
-{
+typedef struct _DUO_CONTROLLER_INPUT_REPORT_DS {
   UINT8 LeftStickX;
   UINT8 LeftStickY;
   UINT8 RightStickX;
@@ -199,8 +196,7 @@ typedef struct _DUO_CONTROLLER_INPUT_REPORT_DS
 /**
  * @brief The DualShock 4 controller input report structure.
  */
-typedef struct _DUO_CONTROLLER_INPUT_REPORT_DS4
-{
+typedef struct _DUO_CONTROLLER_INPUT_REPORT_DS4 {
   UINT8 LeftStickHorizontal;
   UINT8 LeftStickVertical;
   UINT8 RightStickHorizontal;
@@ -209,7 +205,7 @@ typedef struct _DUO_CONTROLLER_INPUT_REPORT_DS4
   UINT8 LeftTrigger;
   UINT8 RightTrigger;
 
-  UINT8 DPad; // 0 = Up, 1 = Up-Right, 2 = Right, 3 = Down-Right, 4 = Down, 5 = Down-Left, 6 = Left, 7 = Up-Left, 8 = Neutral
+  UINT8 DPad;  // 0 = Up, 1 = Up-Right, 2 = Right, 3 = Down-Right, 4 = Down, 5 = Down-Left, 6 = Left, 7 = Up-Left, 8 = Neutral
 
   UINT8 Square : 1;
   UINT8 Cross : 1;
@@ -237,7 +233,7 @@ typedef struct _DUO_CONTROLLER_INPUT_REPORT_DS4
   DS_TOUCH_DATA TouchData;
 } DUO_CONTROLLER_INPUT_REPORT_DS4;
 
-#pragma pack(pop)
+  #pragma pack(pop)
 
 /**
  * @brief Receives an output report from a DuoHid controller.
@@ -252,8 +248,7 @@ typedef struct _DUO_CONTROLLER_INPUT_REPORT_DS4
  * @param data The report bytes, valid only for the duration of the call.
  * @param dataSize The number of valid bytes in data.
  */
-typedef void (CALLBACK* DuoHid_OutputCallback_t)(void* context, UCHAR source, UCHAR reportId,
-                                                 const UCHAR* data, ULONG dataSize);
+typedef void(CALLBACK *DuoHid_OutputCallback_t)(void *context, UCHAR source, UCHAR reportId, const UCHAR *data, ULONG dataSize);
 
 /**
  * @brief Initializes the DuoHid library.
@@ -276,16 +271,14 @@ WINUSERAPI HRESULT WINAPI DuoHid_Uninitialize();
  * @param controller Receives the created controller.
  * @returns S_OK if the controller was created successfully.
  */
-WINUSERAPI HRESULT WINAPI DuoHid_CreateController(const wchar_t* profileId, ULONG sessionId,
-                                                  DuoHid_OutputCallback_t outputCallback,
-                                                  void* outputCallbackContext, void** controller);
+WINUSERAPI HRESULT WINAPI DuoHid_CreateController(const wchar_t *profileId, ULONG sessionId, DuoHid_OutputCallback_t outputCallback, void *outputCallbackContext, void **controller);
 
 /**
  * @brief Removes a Duo controller.
  * @param controller The controller to remove.
  * @returns S_OK if the controller was removed successfully.
  */
-WINUSERAPI HRESULT WINAPI DuoHid_RemoveController(void* controller);
+WINUSERAPI HRESULT WINAPI DuoHid_RemoveController(void *controller);
 
 /**
  * @brief Sends an input report to the given Duo controller.
@@ -295,8 +288,7 @@ WINUSERAPI HRESULT WINAPI DuoHid_RemoveController(void* controller);
  * @param extended Non-zero when report is a full report-id-included vendor blob.
  * @returns S_OK if the report was sent successfully.
  */
-WINUSERAPI HRESULT WINAPI DuoHid_SubmitReport(void* controller, const void* report,
-                                              ULONG reportSize, ULONG extended);
+WINUSERAPI HRESULT WINAPI DuoHid_SubmitReport(void *controller, const void *report, ULONG reportSize, ULONG extended);
 #endif
 
 namespace platf {
@@ -313,7 +305,7 @@ namespace platf {
 
   struct gamepad_context_t {
     // The DuoController handle
-    void* gp;
+    void *gp;
 
     // The feedback queue used to report back vibration
     feedback_queue_t feedback_queue;
@@ -356,7 +348,7 @@ namespace platf {
    * @param y Y component of motion.
    * @param z Z component of motion.
    */
-  template <typename T>
+  template<typename T>
   static void update_motion(T &report, uint8_t motion_type, float x, float y, float z) {
     // Use int32 to process this data, so we can clamp if needed.
     int32_t intX, intY, intZ;
@@ -427,8 +419,7 @@ namespace platf {
      * @brief Initializes the DuoHid helper class.
      * @returns 0 if the initialization was successful.
      */
-    int init()
-    {
+    int init() {
       // Load the DuoHid.dll module
       mDuoHid = LoadLibraryA("DuoHid.dll");
 
@@ -446,11 +437,7 @@ namespace platf {
       fnDuoHid_SubmitReport = (decltype(DuoHid_SubmitReport) *) GetProcAddress(mDuoHid, "DuoHid_SubmitReport");
 
       // Initialize the DuoHid API
-      if (fnDuoHid_Initialize == NULL ||
-          fnDuoHid_Uninitialize == NULL ||
-          fnDuoHid_CreateController == NULL ||
-          fnDuoHid_RemoveController == NULL ||
-          fnDuoHid_SubmitReport == NULL) {
+      if (fnDuoHid_Initialize == NULL || fnDuoHid_Uninitialize == NULL || fnDuoHid_CreateController == NULL || fnDuoHid_RemoveController == NULL || fnDuoHid_SubmitReport == NULL) {
         // We failed to load the DuoHid library
         BOOST_LOG(fatal) << "DuoHid library is unsupported!"sv;
         return -1;
@@ -488,8 +475,7 @@ namespace platf {
      * @param gp_type The type of gamepad.
      * @returns 0 if the gamepad was successfully allocated.
      */
-    int alloc_gamepad_internal(const gamepad_id_t &id, feedback_queue_t &feedback_queue, DUO_CONTROLLER_TYPE gp_type)
-    {
+    int alloc_gamepad_internal(const gamepad_id_t &id, feedback_queue_t &feedback_queue, DUO_CONTROLLER_TYPE gp_type) {
       // Cast the gamepad structure
       auto &gamepad = gamepads[id.globalIndex];
 
@@ -525,7 +511,7 @@ namespace platf {
         gamepad.ds_report.PowerPercent = 10;
 
         // The PowerPercent value is ignored if not set to Charging
-        gamepad.ds_report.PowerState = (UINT8)Charging;
+        gamepad.ds_report.PowerState = (UINT8) Charging;
 
         // Pretend we're USB-wired
         gamepad.ds_report.PluggedUsbData = 1;
@@ -576,11 +562,32 @@ namespace platf {
     }
 
     /**
+     * @brief Points an allocated virtual gamepad at the feedback queue of a new client.
+     * @param nr The gamepad index.
+     * @param feedback_queue The feedback queue that will receive rumble events.
+     * @returns 0 if the gamepad was rebound.
+     */
+    int rebind_gamepad(int nr, feedback_queue_t &feedback_queue) {
+      // Cast the gamepad structure
+      auto &gamepad = gamepads[nr];
+
+      // The gamepad has not been allocated
+      if (!gamepad.gp) {
+        return -1;
+      }
+
+      // Rumble and motion events for this controller now go to the reconnected client
+      gamepad.feedback_queue = std::move(feedback_queue);
+
+      // Gamepad rebound successfully
+      return 0;
+    }
+
+    /**
      * @brief Frees the given virtual gamepad.
      * @param nr The gamepad index.
      */
-    void free_target(int nr)
-    {
+    void free_target(int nr) {
       // Cast the gamepad structure
       auto &gamepad = gamepads[nr];
 
@@ -603,9 +610,8 @@ namespace platf {
      * @param nr The gamepad index.
      * @param report The updated gamepad report.
      */
-    template <typename T>
-    void SendReport(int nr, const T &report)
-    {
+    template<typename T>
+    void SendReport(int nr, const T &report) {
       // Cast the gamepad structure
       auto &gamepad = gamepads[nr];
 
@@ -613,7 +619,7 @@ namespace platf {
       if (gamepad.gp) {
         // Send the gamepad report. The size is passed explicitly: the old API knew the report type from
         // the controller handle, DuoHid takes raw bytes.
-        auto status = fnDuoHid_SubmitReport ? fnDuoHid_SubmitReport(gamepad.gp, const_cast<T*>(&report), (ULONG)sizeof(T), 0) : E_FAIL;
+        auto status = fnDuoHid_SubmitReport ? fnDuoHid_SubmitReport(gamepad.gp, const_cast<T *>(&report), (ULONG) sizeof(T), 0) : E_FAIL;
         if (FAILED(status)) {
           BOOST_LOG(error) << "Could not send controller report: " << util::hex(status).to_string_view();
         }
@@ -664,6 +670,7 @@ namespace platf {
 
     // The virtual gamepad vector
     std::vector<gamepad_context_t> gamepads;
+
   private:
     // The DuoHid module handle
     HMODULE mDuoHid;
@@ -696,11 +703,9 @@ namespace platf {
      * @param data The report bytes.
      * @param dataSize The number of valid bytes in data.
      */
-    static void CALLBACK duo_output_cb(void* context, UCHAR source, UCHAR reportId,
-                                       const UCHAR* data, ULONG dataSize)
-    {
+    static void CALLBACK duo_output_cb(void *context, UCHAR source, UCHAR reportId, const UCHAR *data, ULONG dataSize) {
       // Cast the gamepad this report belongs to
-      auto *gp = reinterpret_cast<gamepad_context_t*>(context);
+      auto *gp = reinterpret_cast<gamepad_context_t *>(context);
       if (gp == NULL || data == NULL) {
         return;
       }
@@ -855,12 +860,17 @@ namespace platf {
     send_input(i);
   }
 
-  util::point_t get_mouse_loc(input_t &input) {
-    throw std::runtime_error("not implemented yet, has to pass tests");
-    // TODO: Tests are failing, something wrong here?
+  void move_mouse(input_t &input, const touch_port_t & /*touch_port*/, int deltaX, int deltaY) {
+    // SendInput relative motion is already measured in screen pixels, so the client surface the
+    // deltas were taken from does not change them. The overload exists for backends that report
+    // motion in raw device units.
+    move_mouse(input, deltaX, deltaY);
+  }
+
+  std::optional<util::point_t> get_mouse_loc(input_t & /*input*/) {
     POINT p;
     if (!GetCursorPos(&p)) {
-      return util::point_t {0.0, 0.0};
+      return std::nullopt;
     }
 
     return util::point_t {
@@ -916,7 +926,7 @@ namespace platf {
     send_input(i);
   }
 
-  void keyboard_update(input_t &input, uint16_t modcode, bool release, uint8_t flags) {
+  void keyboard_update(input_t &input, uint16_t modcode, bool release, uint8_t flags, bool extended) {
     INPUT i {};
     i.type = INPUT_KEYBOARD;
     auto &ki = i.ki;
@@ -941,6 +951,12 @@ namespace platf {
     }
 
     // https://docs.microsoft.com/en-us/windows/win32/inputdev/about-keyboard-input#keystroke-message-flags
+    // A client that sends scancodes reports the extended-key flag itself. The table below covers
+    // clients that do not report it.
+    if (extended) {
+      ki.dwFlags |= KEYEVENTF_EXTENDEDKEY;
+    }
+
     switch (modcode) {
       case VK_LWIN:
       case VK_RWIN:
@@ -1060,8 +1076,7 @@ namespace platf {
 
     // Try to find a matching pointer ID
     for (UINT32 i = 0; i < ARRAYSIZE(raw->touchInfo); i++) {
-      if (raw->touchInfo[i].touchInfo.pointerInfo.pointerId == pointerId &&
-          raw->touchInfo[i].touchInfo.pointerInfo.pointerFlags != POINTER_FLAG_NONE) {
+      if (raw->touchInfo[i].touchInfo.pointerInfo.pointerId == pointerId && raw->touchInfo[i].touchInfo.pointerInfo.pointerFlags != POINTER_FLAG_NONE) {
         if (eventType == LI_TOUCH_EVENT_DOWN && (raw->touchInfo[i].touchInfo.pointerInfo.pointerFlags & POINTER_FLAG_INCONTACT)) {
           BOOST_LOG(warning) << "Pointer "sv << pointerId << " already down. Did the client drop an up/cancel event?"sv;
         }
@@ -1220,9 +1235,7 @@ namespace platf {
     auto raw = (client_input_raw_t *) input;
 
     // Bail if we're not running on an OS that supports virtual touch input
-    if (!raw->global->fnCreateSyntheticPointerDevice ||
-        !raw->global->fnInjectSyntheticPointerInput ||
-        !raw->global->fnDestroySyntheticPointerDevice) {
+    if (!raw->global->fnCreateSyntheticPointerDevice || !raw->global->fnInjectSyntheticPointerInput || !raw->global->fnDestroySyntheticPointerDevice) {
       BOOST_LOG(warning) << "Touch input requires Windows 10 1809 or later"sv;
       return;
     }
@@ -1346,9 +1359,7 @@ namespace platf {
     auto raw = (client_input_raw_t *) input;
 
     // Bail if we're not running on an OS that supports virtual pen input
-    if (!raw->global->fnCreateSyntheticPointerDevice ||
-        !raw->global->fnInjectSyntheticPointerInput ||
-        !raw->global->fnDestroySyntheticPointerDevice) {
+    if (!raw->global->fnCreateSyntheticPointerDevice || !raw->global->fnInjectSyntheticPointerInput || !raw->global->fnDestroySyntheticPointerDevice) {
       BOOST_LOG(warning) << "Pen input requires Windows 10 1809 or later"sv;
       return;
     }
@@ -1455,7 +1466,7 @@ namespace platf {
     }
   }
 
-  void unicode(input_t &input, char *utf8, int size) {
+  void unicode(input_t &input, const char *utf8, int size) {
     // We can do no worse than one UTF-16 character per byte of UTF-8
     WCHAR wide[size];
 
@@ -1490,6 +1501,25 @@ namespace platf {
    * @param metadata The virtual gamepad metadata.
    * @param feedback_queue The feedback queue used to transmit virtual gamepad output data.
    */
+  /**
+   * @brief The virtual gamepad profiles a Duo session can present, and the controller shape each
+   *        one drives.
+   *
+   * These are the profile names upstream used for the Virtual HID Broker backend. Each maps to the
+   * closest HIDMaestro profile whose report layout this file produces: every Xbox family name
+   * presents the XInput-shaped 360 report, and the PlayStation names present their own reports.
+   * `switch` and `generic` are absent because the HIDMaestro profiles for those devices use report
+   * layouts this file does not produce.
+   */
+  constexpr std::array<std::pair<std::string_view, DUO_CONTROLLER_TYPE>, 6> duo_gamepad_profiles {{
+    std::pair {"x360"sv, DuoControllerTypeXbox},
+    std::pair {"xone"sv, DuoControllerTypeXbox},
+    std::pair {"xseries"sv, DuoControllerTypeXbox},
+    std::pair {"ds4"sv, DuoControllerTypeDualShock4},
+    std::pair {"ds5"sv, DuoControllerTypeDualSense},
+    std::pair {"ds5e"sv, DuoControllerTypeDualSenseEdge},
+  }};
+
   int alloc_gamepad(input_t &input, const gamepad_id_t &id, const gamepad_arrival_t &metadata, feedback_queue_t feedback_queue) {
     // Cast the raw input structure
     auto raw = (input_raw_t *) input.get();
@@ -1497,18 +1527,9 @@ namespace platf {
     // The selected gamepad type
     DUO_CONTROLLER_TYPE selectedGamepadType = DuoControllerTypeDualSenseEdge;
 
-    if (config::input.gamepad == "xone"sv) {
-      BOOST_LOG(info) << "Gamepad " << id.globalIndex << " will be Xbox One controller (manual selection)"sv;
-      selectedGamepadType = DuoControllerTypeXbox;
-    } else if (config::input.gamepad == "ds4"sv) {
-      BOOST_LOG(info) << "Gamepad " << id.globalIndex << " will be DualShock 4 controller (manual selection)"sv;
-      selectedGamepadType = DuoControllerTypeDualShock4;
-    } else if (config::input.gamepad == "ds5"sv) {
-      BOOST_LOG(info) << "Gamepad " << id.globalIndex << " will be DualSense controller (manual selection)"sv;
-      selectedGamepadType = DuoControllerTypeDualSense;
-    } else if (config::input.gamepad == "ds5e"sv) {
-      BOOST_LOG(info) << "Gamepad " << id.globalIndex << " will be DualSense Edge controller (manual selection)"sv;
-      selectedGamepadType = DuoControllerTypeDualSenseEdge;
+    if (const auto profile = std::ranges::find(duo_gamepad_profiles, config::input.gamepad, &std::pair<std::string_view, DUO_CONTROLLER_TYPE>::first); profile != duo_gamepad_profiles.end()) {
+      BOOST_LOG(info) << "Gamepad " << id.globalIndex << " will be " << profile->first << " controller (manual selection)"sv;
+      selectedGamepadType = profile->second;
     } else if (metadata.type == LI_CTYPE_PS) {
       BOOST_LOG(info) << "Gamepad " << id.globalIndex << " will be DualShock 4 controller (auto-selected by client-reported type)"sv;
       selectedGamepadType = DuoControllerTypeDualShock4;
@@ -1547,6 +1568,21 @@ namespace platf {
   }
 
   /**
+   * @brief Re-points a retained virtual gamepad at the feedback queue of the client that reconnected.
+   * @param input The raw input structure.
+   * @param id The virtual gamepad index.
+   * @param feedback_queue The feedback queue used to transmit virtual gamepad output data.
+   * @returns 0 if the gamepad was rebound.
+   */
+  int rebind_gamepad(input_t &input, const gamepad_id_t &id, feedback_queue_t feedback_queue) {
+    // Cast the raw input structure
+    auto raw = (input_raw_t *) input.get();
+
+    // Rebind the virtual gamepad
+    return raw->duo->rebind_gamepad(id.globalIndex, feedback_queue);
+  }
+
+  /**
    * @brief Frees the given virtual gamepad.
    * @param input The raw input structure.
    * @param nr The virtual gamepad index.
@@ -1564,8 +1600,7 @@ namespace platf {
    * @param val The analog stick axis.
    * @return The snapped analog stick axis.
    */
-  static inline uint16_t snap_to_analog_stick_axis_boundary(int16_t val)
-  {
+  static inline uint16_t snap_to_analog_stick_axis_boundary(int16_t val) {
     // Convert signed range (-32768..32767) to unsigned (0..65535)
     const uint16_t unsigned_val = static_cast<uint16_t>(static_cast<int32_t>(val) + 32768);
 
@@ -1600,20 +1635,30 @@ namespace platf {
     auto flags = gamepad_state.buttonFlags;
 
     // Convert individual DPad flags to 0-8 value (0=None, 1=North, clockwise increments of 45°)
-    bool up    = (flags & DPAD_UP) != 0;
-    bool down  = (flags & DPAD_DOWN) != 0;
-    bool left  = (flags & DPAD_LEFT) != 0;
+    bool up = (flags & DPAD_UP) != 0;
+    bool down = (flags & DPAD_DOWN) != 0;
+    bool left = (flags & DPAD_LEFT) != 0;
     bool right = (flags & DPAD_RIGHT) != 0;
 
-    if (up && right)      report.DPad = 2;  // Northeast
-    else if (right && down) report.DPad = 4;  // Southeast
-    else if (down && left)  report.DPad = 6;  // Southwest
-    else if (left && up)    report.DPad = 8;  // Northwest
-    else if (up)            report.DPad = 1;  // North
-    else if (right)         report.DPad = 3;  // East
-    else if (down)          report.DPad = 5;  // South
-    else if (left)          report.DPad = 7;  // West
-    else                    report.DPad = 0;  // None
+    if (up && right) {
+      report.DPad = 2;  // Northeast
+    } else if (right && down) {
+      report.DPad = 4;  // Southeast
+    } else if (down && left) {
+      report.DPad = 6;  // Southwest
+    } else if (left && up) {
+      report.DPad = 8;  // Northwest
+    } else if (up) {
+      report.DPad = 1;  // North
+    } else if (right) {
+      report.DPad = 3;  // East
+    } else if (down) {
+      report.DPad = 5;  // South
+    } else if (left) {
+      report.DPad = 7;  // West
+    } else {
+      report.DPad = 0;  // None
+    }
     report.Start = (flags & START) != 0;
     report.Back = (flags & BACK) != 0;
     report.LeftStick = (flags & LEFT_STICK) != 0;
@@ -1808,9 +1853,7 @@ namespace platf {
       return;
     }
 
-    auto &touchData = gamepad.type == DuoControllerTypeDualShock4
-      ? gamepad.ds4_report.TouchData
-      : gamepad.ds_report.TouchData;
+    auto &touchData = gamepad.type == DuoControllerTypeDualShock4 ? gamepad.ds4_report.TouchData : gamepad.ds_report.TouchData;
 
     uint8_t pointerIndex;
     if (touch.eventType == LI_TOUCH_EVENT_DOWN) {
@@ -1876,7 +1919,7 @@ namespace platf {
       }
     }
 
-    // Touchpad is 1920x943 according to ViGEm
+    // The DualSense touchpad surface is 1920x943.
     uint16_t x = touch.x * 1920;
     uint16_t y = touch.y * 943;
 
@@ -1934,22 +1977,28 @@ namespace platf {
     return;
   }
 
-  void freeInput(void *p) {
-    auto input = (input_raw_t *) p;
-
-    delete input;
+  void freeInput(input_raw_t *input) {
+    std::default_delete<input_raw_t> {}(input);
   }
 
   std::vector<supported_gamepad_t> &supported_gamepads(input_t *input) {
-    static std::vector gps {
-      supported_gamepad_t {"auto", true, ""},
-      supported_gamepad_t {"xone", true, ""},
-      supported_gamepad_t {"ds4", true, ""},
-      supported_gamepad_t {"ds5", true, ""},
-      supported_gamepad_t {"ds5e", true, ""},
-    };
+    static std::vector<supported_gamepad_t> gamepads;
+    gamepads.clear();
 
-    return gps;
+    if (config::input.gamepad_driver == config::GAMEPAD_DRIVER_NONE) {
+      return gamepads;
+    }
+
+    // A virtual gamepad needs DuoHid.dll to have loaded and initialized for this session.
+    const auto available = input != nullptr && ((input_raw_t *) input->get())->duo != nullptr;
+    const auto reason = available ? "" : "gamepads.hidmaestro-not-available";
+
+    gamepads.emplace_back(std::string {"auto"}, available, reason);
+    for (const auto &[name, type] : duo_gamepad_profiles) {
+      gamepads.emplace_back(std::string {name}, available, reason);
+    }
+
+    return gamepads;
   }
 
   /**

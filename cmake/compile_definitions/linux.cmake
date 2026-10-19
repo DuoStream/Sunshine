@@ -304,13 +304,6 @@ if(NOT ${CUDA_FOUND}
     message(FATAL_ERROR "Couldn't find either cuda, libdrm, libva, kwin, pipewire, portal, wayland or x11")
 endif()
 
-# These need to be set before common.cmake adds the libvirtualhid subdirectory in order for them to be picked up
-set(LIBEVDEV_CUSTOM_INCLUDE_DIR "${EVDEV_INCLUDE_DIR}")
-set(LIBEVDEV_CUSTOM_LIBRARY "${EVDEV_LIBRARY}")
-
-list(APPEND PLATFORM_TARGET_FILES
-        "${CMAKE_SOURCE_DIR}/src/platform/linux/input/virtualhid.cpp")
-
 # AppImage and Flatpak
 if (${SUNSHINE_BUILD_APPIMAGE})
     list(APPEND SUNSHINE_DEFINITIONS SUNSHINE_BUILD_APPIMAGE=1)
@@ -323,6 +316,7 @@ include_directories(SYSTEM
         ${CMAKE_BINARY_DIR}/generated-src)
 
 list(APPEND PLATFORM_TARGET_FILES
+        "${CMAKE_SOURCE_DIR}/src/platform/linux/input/input.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/publish.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/graphics.h"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/graphics.cpp"

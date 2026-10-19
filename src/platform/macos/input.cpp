@@ -1,6 +1,6 @@
 /**
  * @file src/platform/macos/input.cpp
- * @brief Definitions for libvirtualhid-backed macOS input handling.
+ * @brief Definitions for macOS input handling.
  */
 
 // platform includes
@@ -8,16 +8,11 @@
 
 // standard includes
 #include <cstdint>
-#include <memory>
-#include <utility>
+#include <optional>
 #include <vector>
 
-// lib includes
-#include <libvirtualhid/license.hpp>
-
 // local includes
-#include "src/config.h"
-#include "src/platform/virtualhid_input.h"
+#include "src/platform/common.h"
 
 namespace platf {
 
@@ -33,37 +28,15 @@ namespace platf {
   }
 
   platform_caps::caps_t get_capabilities() {
-    platform_caps::caps_t caps = 0;
-    const auto runtime = virtualhid::create_runtime();
-    if (!runtime) {
-      return caps;
-    }
-
-    const auto &capabilities = runtime->capabilities();
-    if (config::input.gamepad_driver != config::GAMEPAD_DRIVER_NONE && capabilities.supports_gamepad && lvh::get_license_status().license.licensed() && virtualhid::configured_gamepad_supports_controller_extensions()) {
-      caps |= platform_caps::controller_touch;
-    }
-    if (config::input.native_pen_touch && (capabilities.supports_touchscreen || capabilities.supports_pen_tablet)) {
-      caps |= platform_caps::pen_touch;
-    }
-
-    return caps;
+    // Virtual gamepads, pen and touch on macOS were provided by the Virtual HID Broker backend,
+    // which this build does not ship. Keyboard and mouse injection still use CoreGraphics events,
+    // so only the device-backed capabilities are absent.
+    return 0;
   }
 
-  std::vector<supported_gamepad_t> &supported_gamepads(input_t *input) {
+  std::vector<supported_gamepad_t> &supported_gamepads(input_t * /*input*/) {
     static std::vector<supported_gamepad_t> gamepads;
-    if (!input || !input->get()) {
-      gamepads = virtualhid::static_supported_gamepads();
-      return gamepads;
-    }
-
-    if (config::input.gamepad_driver == config::GAMEPAD_DRIVER_NONE) {
-      gamepads.clear();
-      return gamepads;
-    }
-
-    const auto licensed = lvh::get_license_status().license.licensed();
-    gamepads = virtualhid::supported_gamepads(virtualhid::get_input_context(*input).runtime.get(), false, licensed, true);
+    gamepads.clear();
     return gamepads;
   }
 

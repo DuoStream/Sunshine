@@ -1,11 +1,11 @@
 /**
- * @file src/platform/linux/input/virtualhid.cpp
- * @brief Definitions for libvirtualhid Unix input handling.
+ * @file src/platform/linux/input/input.cpp
+ * @brief Definitions for Unix input handling.
  */
 
 // standard includes
-#include <memory>
-#include <utility>
+#include <optional>
+#include <vector>
 
 // platform includes
 #ifdef SUNSHINE_BUILD_X11
@@ -13,26 +13,16 @@
 #endif
 
 // local includes
-#include "src/platform/virtualhid_input.h"
+#include "src/platform/common.h"
 
 using namespace std::literals;
 
 namespace platf {
   platform_caps::caps_t get_capabilities() {
-    platform_caps::caps_t caps = 0;
-    const auto runtime = virtualhid::create_runtime();
-    if (!runtime) {
-      return caps;
-    }
-
-    if (const auto &capabilities = runtime->capabilities(); config::input.native_pen_touch && (capabilities.supports_touchscreen || capabilities.supports_pen_tablet)) {
-      caps |= platform_caps::pen_touch;
-    }
-    if (virtualhid::configured_gamepad_supports_controller_extensions()) {
-      caps |= platform_caps::controller_touch;
-    }
-
-    return caps;
+    // Virtual gamepads, pen and touch on Unix were provided by the Virtual HID Broker backend,
+    // which this build does not ship. Keyboard and mouse injection still use the platform's own
+    // event paths, so only the device-backed capabilities are absent.
+    return 0;
   }
 
   std::optional<util::point_t> get_mouse_loc(input_t & /*input*/) {
@@ -66,14 +56,9 @@ namespace platf {
 #endif
   }
 
-  std::vector<supported_gamepad_t> &supported_gamepads(input_t *input) {
+  std::vector<supported_gamepad_t> &supported_gamepads(input_t * /*input*/) {
     static std::vector<supported_gamepad_t> gamepads;
-    if (!input || !input->get()) {
-      gamepads = virtualhid::static_supported_gamepads();
-      return gamepads;
-    }
-
-    gamepads = virtualhid::supported_gamepads(virtualhid::get_input_context(*input).runtime.get());
+    gamepads.clear();
     return gamepads;
   }
 }  // namespace platf

@@ -156,7 +156,8 @@ namespace dyn {
 
 namespace platf {
   std::vector<permission_status_t> get_permission_statuses() {
-    // Match libvirtualhid's device paths and its read/write access check.
+    // Virtual gamepad and raw-input devices are created through the uinput interface, so input
+    // access is reported from the same device nodes the platform would use.
     bool input_access = access("/dev/uinput", R_OK | W_OK) == 0;
 #ifndef __FreeBSD__
     input_access = input_access || access("/dev/input/uinput", R_OK | W_OK) == 0;

@@ -33,7 +33,6 @@ extern "C" {
 #include "input.h"
 #include "logging.h"
 #include "platform/common.h"
-#include "platform/virtualhid_input.h"
 #include "thread_pool.h"
 #include "utility.h"
 
@@ -2409,20 +2408,6 @@ namespace input {
     const auto &gamepads = platf::supported_gamepads(std::addressof(platf_input));
     return std::ranges::none_of(gamepads, [](const auto &gamepad) {
       return gamepad.is_enabled && gamepad.name != "auto";
-    });
-  }
-
-  void refresh_virtual_input() {
-    dispatch_input_task([]() {
-      if (platf_input) {
-        task_pool.cancel(key_press_repeat_id);
-        key_press_repeat_id = nullptr;
-        reset_mouse_buttons();
-        reset_keyboard_keys();
-        auto &context = platf::virtualhid::get_input_context(platf_input);
-        context.refresh_keyboard();
-        context.refresh_mouse();
-      }
     });
   }
 

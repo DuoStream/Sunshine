@@ -137,8 +137,7 @@ jobs:
 
           rule_file="$(find /lib /usr/lib -path '*/udev/rules.d/60-sunshine.rules' -print -quit)"
           test -n "${rule_file}"
-          grep -Fq 'IMPORT{parent}="HID_*"' "${rule_file}"
-          grep -Fq 'ENV{HID_PHYS}=="libvirtualhid/uhid/*"' "${rule_file}"
+          grep -Fq 'KERNEL=="uinput"' "${rule_file}"
           test -e /sys/class/mem/null
           if ! udevadm test --action=add /sys/class/mem/null > udevadm-test.txt 2>&1; then
             cat udevadm-test.txt

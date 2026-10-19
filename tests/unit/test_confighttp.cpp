@@ -116,14 +116,6 @@ protected:
   void SetUp() override {
     BaseTest::SetUp();
     nvhttp::expire_pair_sessions(std::chrono::steady_clock::time_point::max());
-    confighttp::set_virtual_input_license_status_provider_for_testing([]() {
-      lvh::LicenseStatus license;
-      license.service_available = true;
-      license.state = lvh::LicenseState::licensed;
-      license.active_devices = 2;
-      license.message = "Test license status";
-      return lvh::LicenseResult {lvh::OperationStatus::success(), std::move(license)};
-    });
     confighttp::set_permission_statuses_for_testing(nlohmann::json::array({
       {{"id", "screen_recording"}, {"status", "denied"}, {"required", true}, {"verifiable", true}},
       {{"id", "notifications"}, {"status", "granted"}, {"required", false}, {"verifiable", true}},
@@ -333,9 +325,6 @@ protected:
       confighttp::browseDirectory(response, request);
     };
 
-    server->resource["^/virtual-input-status-test$"]["GET"] = confighttp::getVirtualInputStatus;
-    server->resource["^/virtual-input-license-test$"]["GET"] = confighttp::getVirtualInputLicense;
-    server->resource["^/virtual-input-license-test$"]["POST"] = confighttp::updateVirtualInputLicense;
     server->resource["^/permissions-test$"]["GET"] = confighttp::getPermissions;
     server->resource["^/permissions-test$"]["POST"] = confighttp::requestPermission;
     server->resource["^/pairing-test$"]["DELETE"] = confighttp::cancelPairing;
@@ -375,7 +364,6 @@ protected:
     if (server_thread.joinable()) {
       server_thread.join();
     }
-    confighttp::reset_virtual_input_license_status_provider_for_testing();
     confighttp::reset_permission_statuses_for_testing();
     confighttp::reset_portal_token_path_provider_for_testing();
 
@@ -453,15 +441,6 @@ namespace {
   };
 
   /**
-   * @brief Invalid virtual-input license request and expected error.
-   */
-  struct invalid_license_request_t {
-    const char *name;  ///< Stable parameter name.
-    const char *body;  ///< Invalid request body.
-    const char *expected_error;  ///< Expected response error.
-  };
-
-  /**
    * @brief Return the stable name for an endpoint request parameter.
    *
    * @param param_info Parameter information supplied by GoogleTest.
@@ -472,37 +451,21 @@ namespace {
   }
 
   /**
-   * @brief Return the stable name for an invalid license request parameter.
-   *
-   * @param param_info Parameter information supplied by GoogleTest.
-   * @return Stable test suffix.
+   * @brief Parameterized fixture for endpoints that require authentication.
    */
-  std::string invalid_license_request_name(const testing::TestParamInfo<invalid_license_request_t> &param_info) {
-    return param_info.param.name;
+  class AuthenticatedConfigHttpEndpointTest: public ConfigHttpTest, public testing::WithParamInterface<endpoint_request_t> {};
+
+  /**
+   * @brief Parameterized fixture for endpoints protected from cross-origin requests.
+   */
+  class CsrfProtectedConfigHttpEndpointTest: public ConfigHttpTest, public testing::WithParamInterface<endpoint_request_t> {};
+
+  TEST_P(AuthenticatedConfigHttpEndpointTest, RejectsUnauthenticatedRequest) {
+    const auto &request = GetParam();
+    const auto response = client->request(request.method, request.path, request.body);
+    ASSERT_EQ(response->status_code, "401 Unauthorized");
+    EXPECT_NE(response->header.find("WWW-Authenticate"), response->header.end());
   }
-}  // namespace
-
-/**
- * @brief Parameterized fixture for endpoints that require authentication.
- */
-class AuthenticatedConfigHttpEndpointTest: public ConfigHttpTest, public testing::WithParamInterface<endpoint_request_t> {};
-
-/**
- * @brief Parameterized fixture for endpoints protected from cross-origin requests.
- */
-class CsrfProtectedConfigHttpEndpointTest: public ConfigHttpTest, public testing::WithParamInterface<endpoint_request_t> {};
-
-/**
- * @brief Parameterized fixture for invalid virtual-input license requests.
- */
-class InvalidVirtualInputLicenseRequestTest: public ConfigHttpTest, public testing::WithParamInterface<invalid_license_request_t> {};
-
-TEST_P(AuthenticatedConfigHttpEndpointTest, RejectsUnauthenticatedRequest) {
-  const auto &request = GetParam();
-  const auto response = client->request(request.method, request.path, request.body);
-  ASSERT_EQ(response->status_code, "401 Unauthorized");
-  EXPECT_NE(response->header.find("WWW-Authenticate"), response->header.end());
-}
 
 INSTANTIATE_TEST_SUITE_P(
   ConfigHttpEndpoints,
@@ -512,23 +475,19 @@ INSTANTIATE_TEST_SUITE_P(
     endpoint_request_t {"CsrfToken", "GET", "/csrf-token-test", ""},
     endpoint_request_t {"BrowseDirectory", "GET", "/browse-test", ""},
     endpoint_request_t {"PairingList", "GET", "/pairing-test", ""},
-    endpoint_request_t {"PortalTokenReset", "POST", "/portal-token-reset-test", ""},
-    endpoint_request_t {"VirtualInputStatus", "GET", "/virtual-input-status-test", ""},
-    endpoint_request_t {"VirtualInputLicense", "GET", "/virtual-input-license-test", ""},
-    endpoint_request_t {"VirtualInputLicenseUpdate", "POST", "/virtual-input-license-test", R"({"action":"validate"})"}
-  ),
+    endpoint_request_t {"PortalTokenReset", "POST", "/portal-token-reset-test", ""}
   endpoint_request_name
 );
 
 TEST_P(CsrfProtectedConfigHttpEndpointTest, RejectsCrossOriginRequestWithoutToken) {
-  const auto &request = GetParam();
-  SimpleWeb::CaseInsensitiveMultimap headers;
-  headers.emplace("Authorization", create_auth_header("testuser", "testpass"));
-  headers.emplace("Origin", "https://example.invalid");
+    const auto &request = GetParam();
+    SimpleWeb::CaseInsensitiveMultimap headers;
+    headers.emplace("Authorization", create_auth_header("testuser", "testpass"));
+    headers.emplace("Origin", "https://example.invalid");
 
-  const auto response = client->request(request.method, request.path, request.body, headers);
-  ASSERT_EQ(response->status_code, "400 Bad Request");
-  EXPECT_TRUE(response->content.string().contains("Missing CSRF token"));
+    const auto response = client->request(request.method, request.path, request.body, headers);
+    ASSERT_EQ(response->status_code, "400 Bad Request");
+    EXPECT_TRUE(response->content.string().contains("Missing CSRF token"));
 }
 
 INSTANTIATE_TEST_SUITE_P(
@@ -536,622 +495,597 @@ INSTANTIATE_TEST_SUITE_P(
   CsrfProtectedConfigHttpEndpointTest,
   testing::Values(
     endpoint_request_t {"CsrfValidation", "POST", "/csrf-validate-test", ""},
-    endpoint_request_t {"PortalTokenReset", "POST", "/portal-token-reset-test", ""},
-    endpoint_request_t {"VirtualInputLicenseUpdate", "POST", "/virtual-input-license-test", R"({"action":"validate"})"}
-  ),
+    endpoint_request_t {"PortalTokenReset", "POST", "/portal-token-reset-test", ""}
   endpoint_request_name
 );
-
-TEST_P(InvalidVirtualInputLicenseRequestTest, ReturnsExpectedError) {
-  const auto &request = GetParam();
-  SimpleWeb::CaseInsensitiveMultimap headers;
-  headers.emplace("Authorization", create_auth_header("testuser", "testpass"));
-  headers.emplace("Origin", std::format("https://localhost:{}", port));
-
-  const auto response = client->request("POST", "/virtual-input-license-test", request.body, headers);
-  ASSERT_EQ(response->status_code, "400 Bad Request");
-  EXPECT_TRUE(response->content.string().contains(request.expected_error));
-}
-
-INSTANTIATE_TEST_SUITE_P(
-  InvalidRequests,
-  InvalidVirtualInputLicenseRequestTest,
-  testing::Values(
-    invalid_license_request_t {"InvalidJson", "not-json", "Invalid license request"},
-    invalid_license_request_t {"UnknownAction", R"({"action":"unknown"})", "Unknown license action"},
-    invalid_license_request_t {"MissingActivationKey", R"({"action":"activate","license_key":""})", "License key is required"}
-  ),
-  invalid_license_request_name
-);
-
 TEST_F(ConfigHttpTest, PairingMutationsRejectUnauthenticatedRestRequests) {
-  SimpleWeb::CaseInsensitiveMultimap headers;
-  headers.emplace("Content-Type", "application/json");
+    SimpleWeb::CaseInsensitiveMultimap headers;
+    headers.emplace("Content-Type", "application/json");
 
-  const auto post_response = client->request(
-    "POST",
-    "/pairing-test",
-    R"({"pairing_id":"0123456789abcdef0123456789abcdef","pin":"1234","name":"Client"})",
-    headers
-  );
-  EXPECT_EQ(post_response->status_code, "401 Unauthorized");
+    const auto post_response = client->request(
+      "POST",
+      "/pairing-test",
+      R"({"pairing_id":"0123456789abcdef0123456789abcdef","pin":"1234","name":"Client"})",
+      headers
+    );
+    EXPECT_EQ(post_response->status_code, "401 Unauthorized");
 
-  const auto delete_response = client->request(
-    "DELETE",
-    "/pairing-test",
-    R"({"pairing_id":"0123456789abcdef0123456789abcdef"})",
-    headers
-  );
-  EXPECT_EQ(delete_response->status_code, "401 Unauthorized");
+    const auto delete_response = client->request(
+      "DELETE",
+      "/pairing-test",
+      R"({"pairing_id":"0123456789abcdef0123456789abcdef"})",
+      headers
+    );
+    EXPECT_EQ(delete_response->status_code, "401 Unauthorized");
 }
 
 TEST_F(ConfigHttpTest, PairingMutationsRejectCrossOriginRestRequestsWithoutCsrfToken) {
-  const std::string pairing_id = insert_pending_pairing();
-  SimpleWeb::CaseInsensitiveMultimap headers;
-  headers.emplace("Authorization", create_auth_header("testuser", "testpass"));
-  headers.emplace("Content-Type", "application/json");
-  headers.emplace("Origin", "https://example.invalid");
+    const std::string pairing_id = insert_pending_pairing();
+    SimpleWeb::CaseInsensitiveMultimap headers;
+    headers.emplace("Authorization", create_auth_header("testuser", "testpass"));
+    headers.emplace("Content-Type", "application/json");
+    headers.emplace("Origin", "https://example.invalid");
 
-  const auto post_response = client->request(
-    "POST",
-    "/pairing-test",
-    nlohmann::json {
-      {"pairing_id", pairing_id},
-      {"pin", "1234"},
-      {"name", "Client"},
-    }
-      .dump(),
-    headers
-  );
-  EXPECT_EQ(post_response->status_code, "400 Bad Request");
-  EXPECT_TRUE(post_response->content.string().contains("Missing CSRF token"));
+    const auto post_response = client->request(
+      "POST",
+      "/pairing-test",
+      nlohmann::json {
+        {"pairing_id", pairing_id},
+        {"pin", "1234"},
+        {"name", "Client"},
+      }
+        .dump(),
+      headers
+    );
+    EXPECT_EQ(post_response->status_code, "400 Bad Request");
+    EXPECT_TRUE(post_response->content.string().contains("Missing CSRF token"));
 
-  const auto delete_response = client->request(
-    "DELETE",
-    "/pairing-test",
-    nlohmann::json {{"pairing_id", pairing_id}}.dump(),
-    headers
-  );
-  EXPECT_EQ(delete_response->status_code, "400 Bad Request");
-  EXPECT_TRUE(delete_response->content.string().contains("Missing CSRF token"));
-  EXPECT_EQ(nvhttp::get_pending_pairings().size(), 1);
+    const auto delete_response = client->request(
+      "DELETE",
+      "/pairing-test",
+      nlohmann::json {{"pairing_id", pairing_id}}.dump(),
+      headers
+    );
+    EXPECT_EQ(delete_response->status_code, "400 Bad Request");
+    EXPECT_TRUE(delete_response->content.string().contains("Missing CSRF token"));
+    EXPECT_EQ(nvhttp::get_pending_pairings().size(), 1);
 }
 
 TEST_F(ConfigHttpTest, PairingRestApiListsAuthenticatedPendingRequests) {
-  const std::string pairing_id = insert_pending_pairing();
-  SimpleWeb::CaseInsensitiveMultimap headers;
-  headers.emplace("Authorization", create_auth_header("testuser", "testpass"));
+    const std::string pairing_id = insert_pending_pairing();
+    SimpleWeb::CaseInsensitiveMultimap headers;
+    headers.emplace("Authorization", create_auth_header("testuser", "testpass"));
 
-  const auto response = client->request("GET", "/pairing-test", "", headers);
-  ASSERT_EQ(response->status_code, "200 OK");
-  const auto body = nlohmann::json::parse(response->content.string());
-  ASSERT_EQ(body.at("pairings").size(), 1);
-  EXPECT_EQ(body.at("pairings").front().at("id"), pairing_id);
-  EXPECT_EQ(body.at("pairings").front().at("name"), "REST client");
-  EXPECT_EQ(body.at("pairings").front().at("address"), "192.0.2.30");
+    const auto response = client->request("GET", "/pairing-test", "", headers);
+    ASSERT_EQ(response->status_code, "200 OK");
+    const auto body = nlohmann::json::parse(response->content.string());
+    ASSERT_EQ(body.at("pairings").size(), 1);
+    EXPECT_EQ(body.at("pairings").front().at("id"), pairing_id);
+    EXPECT_EQ(body.at("pairings").front().at("name"), "REST client");
+    EXPECT_EQ(body.at("pairings").front().at("address"), "192.0.2.30");
 }
 
 TEST_F(ConfigHttpTest, PairingRestApiRejectsMalformedFieldsWithoutConsumingRequest) {
-  const std::string pairing_id = insert_pending_pairing();
-  const std::array invalid_requests {
-    nlohmann::json {{"pairing_id", "not-a-pairing-id"}, {"pin", "1234"}, {"name", "Client"}},
-    nlohmann::json {{"pairing_id", pairing_id}, {"pin", "123"}, {"name", "Client"}},
-    nlohmann::json {{"pairing_id", pairing_id}, {"pin", "12a4"}, {"name", "Client"}},
-    nlohmann::json {{"pairing_id", pairing_id}, {"pin", "1234"}, {"name", ""}},
-    nlohmann::json {{"pairing_id", pairing_id}, {"pin", "1234"}, {"name", std::string(nvhttp::MAX_PAIRING_CLIENT_NAME_SIZE + 1, 'a')}},
-  };
+    const std::string pairing_id = insert_pending_pairing();
+    const std::array invalid_requests {
+      nlohmann::json {{"pairing_id", "not-a-pairing-id"}, {"pin", "1234"}, {"name", "Client"}},
+      nlohmann::json {{"pairing_id", pairing_id}, {"pin", "123"}, {"name", "Client"}},
+      nlohmann::json {{"pairing_id", pairing_id}, {"pin", "12a4"}, {"name", "Client"}},
+      nlohmann::json {{"pairing_id", pairing_id}, {"pin", "1234"}, {"name", ""}},
+      nlohmann::json {{"pairing_id", pairing_id}, {"pin", "1234"}, {"name", std::string(nvhttp::MAX_PAIRING_CLIENT_NAME_SIZE + 1, 'a')}},
+    };
 
-  SimpleWeb::CaseInsensitiveMultimap headers;
-  headers.emplace("Authorization", create_auth_header("testuser", "testpass"));
-  headers.emplace("Content-Type", "application/json");
-  for (const auto &request : invalid_requests) {
-    const auto response = client->request("POST", "/pairing-test", request.dump(), headers);
-    EXPECT_EQ(response->status_code, "400 Bad Request");
-  }
+    SimpleWeb::CaseInsensitiveMultimap headers;
+    headers.emplace("Authorization", create_auth_header("testuser", "testpass"));
+    headers.emplace("Content-Type", "application/json");
+    for (const auto &request : invalid_requests) {
+      const auto response = client->request("POST", "/pairing-test", request.dump(), headers);
+      EXPECT_EQ(response->status_code, "400 Bad Request");
+    }
 
-  const auto pending = nvhttp::get_pending_pairings();
-  ASSERT_EQ(pending.size(), 1);
-  EXPECT_EQ(pending.front().id, pairing_id);
+    const auto pending = nvhttp::get_pending_pairings();
+    ASSERT_EQ(pending.size(), 1);
+    EXPECT_EQ(pending.front().id, pairing_id);
 }
 
 TEST_F(ConfigHttpTest, PairingRestApiCancelsOnlyExplicitRequest) {
-  const std::string pairing_id = insert_pending_pairing();
-  SimpleWeb::CaseInsensitiveMultimap headers;
-  headers.emplace("Authorization", create_auth_header("testuser", "testpass"));
-  headers.emplace("Content-Type", "application/json");
+    const std::string pairing_id = insert_pending_pairing();
+    SimpleWeb::CaseInsensitiveMultimap headers;
+    headers.emplace("Authorization", create_auth_header("testuser", "testpass"));
+    headers.emplace("Content-Type", "application/json");
 
-  const auto response = client->request(
-    "DELETE",
-    "/pairing-test",
-    nlohmann::json {{"pairing_id", pairing_id}}.dump(),
-    headers
-  );
-  ASSERT_EQ(response->status_code, "200 OK");
-  EXPECT_TRUE(nlohmann::json::parse(response->content.string()).at("status").get<bool>());
-  EXPECT_TRUE(nvhttp::get_pending_pairings().empty());
+    const auto response = client->request(
+      "DELETE",
+      "/pairing-test",
+      nlohmann::json {{"pairing_id", pairing_id}}.dump(),
+      headers
+    );
+    ASSERT_EQ(response->status_code, "200 OK");
+    EXPECT_TRUE(nlohmann::json::parse(response->content.string()).at("status").get<bool>());
+    EXPECT_TRUE(nvhttp::get_pending_pairings().empty());
 }
 
 TEST_F(ConfigHttpTest, PairingRestApiReportsIncompleteHandshakeAsFailure) {
-  const std::string pairing_id = insert_pending_pairing();
-  SimpleWeb::CaseInsensitiveMultimap headers;
-  headers.emplace("Authorization", create_auth_header("testuser", "testpass"));
-  headers.emplace("Content-Type", "application/json");
+    const std::string pairing_id = insert_pending_pairing();
+    SimpleWeb::CaseInsensitiveMultimap headers;
+    headers.emplace("Authorization", create_auth_header("testuser", "testpass"));
+    headers.emplace("Content-Type", "application/json");
 
-  const auto response = client->request(
-    "POST",
-    "/pairing-test",
-    nlohmann::json {
-      {"pairing_id", pairing_id},
-      {"pin", "9875"},
-      {"name", "Client"},
-    }
-      .dump(),
-    headers
-  );
-  ASSERT_EQ(response->status_code, "200 OK");
-  EXPECT_FALSE(nlohmann::json::parse(response->content.string()).at("status").get<bool>());
-  EXPECT_TRUE(nvhttp::get_pending_pairings().empty());
+    const auto response = client->request(
+      "POST",
+      "/pairing-test",
+      nlohmann::json {
+        {"pairing_id", pairing_id},
+        {"pin", "9875"},
+        {"name", "Client"},
+      }
+        .dump(),
+      headers
+    );
+    ASSERT_EQ(response->status_code, "200 OK");
+    EXPECT_FALSE(nlohmann::json::parse(response->content.string()).at("status").get<bool>());
+    EXPECT_TRUE(nvhttp::get_pending_pairings().empty());
 }
 
 TEST_F(ConfigHttpTest, PortalTokenResetHandlesSavedTokenForCurrentPlatform) {
-  const auto token_path = test_web_dir / "portal_token";
-  std::ofstream(token_path) << "saved-token";
+    const auto token_path = test_web_dir / "portal_token";
+    std::ofstream(token_path) << "saved-token";
 
-  SimpleWeb::CaseInsensitiveMultimap headers;
-  headers.emplace("Authorization", create_auth_header("testuser", "testpass"));
-  headers.emplace("Origin", std::format("https://localhost:{}", port));
+    SimpleWeb::CaseInsensitiveMultimap headers;
+    headers.emplace("Authorization", create_auth_header("testuser", "testpass"));
+    headers.emplace("Origin", std::format("https://localhost:{}", port));
 
-  const auto response = client->request("POST", "/portal-token-reset-test", "", headers);
+    const auto response = client->request("POST", "/portal-token-reset-test", "", headers);
 
-  ASSERT_EQ(response->status_code, "200 OK");
-  EXPECT_TRUE(nlohmann::json::parse(response->content.string()).at("status").get<bool>());
+    ASSERT_EQ(response->status_code, "200 OK");
+    EXPECT_TRUE(nlohmann::json::parse(response->content.string()).at("status").get<bool>());
 #if defined(linux) || defined(__FreeBSD__)
-  EXPECT_FALSE(std::filesystem::exists(token_path));
+    EXPECT_FALSE(std::filesystem::exists(token_path));
 #else
-  EXPECT_TRUE(std::filesystem::exists(token_path));
+    EXPECT_TRUE(std::filesystem::exists(token_path));
 #endif
 }
 
 TEST_F(ConfigHttpTest, PortalTokenResetSucceedsWhenTokenDoesNotExist) {
-  SimpleWeb::CaseInsensitiveMultimap headers;
-  headers.emplace("Authorization", create_auth_header("testuser", "testpass"));
-  headers.emplace("Origin", std::format("https://localhost:{}", port));
+    SimpleWeb::CaseInsensitiveMultimap headers;
+    headers.emplace("Authorization", create_auth_header("testuser", "testpass"));
+    headers.emplace("Origin", std::format("https://localhost:{}", port));
 
-  const auto response = client->request("POST", "/portal-token-reset-test", "", headers);
+    const auto response = client->request("POST", "/portal-token-reset-test", "", headers);
 
-  ASSERT_EQ(response->status_code, "200 OK");
-  EXPECT_TRUE(nlohmann::json::parse(response->content.string()).at("status").get<bool>());
+    ASSERT_EQ(response->status_code, "200 OK");
+    EXPECT_TRUE(nlohmann::json::parse(response->content.string()).at("status").get<bool>());
 }
 
 TEST_F(ConfigHttpTest, PortalTokenResetReportsDeletionFailure) {
-  const auto token_path = test_web_dir / "portal_token";
-  std::filesystem::create_directories(token_path);
-  std::ofstream(token_path / "contents") << "not empty";
+    const auto token_path = test_web_dir / "portal_token";
+    std::filesystem::create_directories(token_path);
+    std::ofstream(token_path / "contents") << "not empty";
 
-  SimpleWeb::CaseInsensitiveMultimap headers;
-  headers.emplace("Authorization", create_auth_header("testuser", "testpass"));
-  headers.emplace("Origin", std::format("https://localhost:{}", port));
+    SimpleWeb::CaseInsensitiveMultimap headers;
+    headers.emplace("Authorization", create_auth_header("testuser", "testpass"));
+    headers.emplace("Origin", std::format("https://localhost:{}", port));
 
-  const auto response = client->request("POST", "/portal-token-reset-test", "", headers);
+    const auto response = client->request("POST", "/portal-token-reset-test", "", headers);
 
-  ASSERT_EQ(response->status_code, "200 OK");
+    ASSERT_EQ(response->status_code, "200 OK");
 #if defined(linux) || defined(__FreeBSD__)
-  EXPECT_FALSE(nlohmann::json::parse(response->content.string()).at("status").get<bool>());
+    EXPECT_FALSE(nlohmann::json::parse(response->content.string()).at("status").get<bool>());
 #else
-  EXPECT_TRUE(nlohmann::json::parse(response->content.string()).at("status").get<bool>());
+    EXPECT_TRUE(nlohmann::json::parse(response->content.string()).at("status").get<bool>());
 #endif
-  EXPECT_TRUE(std::filesystem::exists(token_path));
+    EXPECT_TRUE(std::filesystem::exists(token_path));
 }
 
 #ifdef SUNSHINE_BUILD_PORTAL
 TEST_F(ConfigHttpTest, PortalTokenResetUsesSessionResolverAndPreservesOtherDesktops) {
-  const auto active_token = test_web_dir / "portal_token.kde";
-  const auto other_token = test_web_dir / "portal_token.gnome";
-  std::ofstream(active_token) << "kde-token";
-  std::ofstream(other_token) << "gnome-token";
-  confighttp::set_portal_token_path_provider_for_testing([this]() {
-    return portal::get_saved_token_path_for_testing(test_web_dir, "KDE");
-  });
+    const auto active_token = test_web_dir / "portal_token.kde";
+    const auto other_token = test_web_dir / "portal_token.gnome";
+    std::ofstream(active_token) << "kde-token";
+    std::ofstream(other_token) << "gnome-token";
+    confighttp::set_portal_token_path_provider_for_testing([this]() {
+      return portal::get_saved_token_path_for_testing(test_web_dir, "KDE");
+    });
 
-  SimpleWeb::CaseInsensitiveMultimap headers;
-  headers.emplace("Authorization", create_auth_header("testuser", "testpass"));
-  headers.emplace("Origin", std::format("https://localhost:{}", port));
-  const auto response = client->request("POST", "/portal-token-reset-test", "", headers);
+    SimpleWeb::CaseInsensitiveMultimap headers;
+    headers.emplace("Authorization", create_auth_header("testuser", "testpass"));
+    headers.emplace("Origin", std::format("https://localhost:{}", port));
+    const auto response = client->request("POST", "/portal-token-reset-test", "", headers);
 
-  ASSERT_EQ(response->status_code, "200 OK");
-  EXPECT_TRUE(nlohmann::json::parse(response->content.string()).at("status").get<bool>());
-  EXPECT_FALSE(std::filesystem::exists(active_token));
-  ASSERT_TRUE(std::filesystem::exists(other_token));
-  std::ifstream remaining_token(other_token);
-  std::string value;
-  std::getline(remaining_token, value);
-  EXPECT_EQ(value, "gnome-token");
+    ASSERT_EQ(response->status_code, "200 OK");
+    EXPECT_TRUE(nlohmann::json::parse(response->content.string()).at("status").get<bool>());
+    EXPECT_FALSE(std::filesystem::exists(active_token));
+    ASSERT_TRUE(std::filesystem::exists(other_token));
+    std::ifstream remaining_token(other_token);
+    std::string value;
+    std::getline(remaining_token, value);
+    EXPECT_EQ(value, "gnome-token");
 }
 
 TEST_F(ConfigHttpTest, PortalTokenResetRemovesMigratedLegacyToken) {
-  const auto legacy_token = test_web_dir / "portal_token";
-  const auto active_token = test_web_dir / "portal_token.kde";
-  std::ofstream(legacy_token) << "legacy-token";
-  confighttp::set_portal_token_path_provider_for_testing([this]() {
-    return portal::get_saved_token_path_for_testing(test_web_dir, "KDE");
-  });
+    const auto legacy_token = test_web_dir / "portal_token";
+    const auto active_token = test_web_dir / "portal_token.kde";
+    std::ofstream(legacy_token) << "legacy-token";
+    confighttp::set_portal_token_path_provider_for_testing([this]() {
+      return portal::get_saved_token_path_for_testing(test_web_dir, "KDE");
+    });
 
-  SimpleWeb::CaseInsensitiveMultimap headers;
-  headers.emplace("Authorization", create_auth_header("testuser", "testpass"));
-  headers.emplace("Origin", std::format("https://localhost:{}", port));
-  const auto response = client->request("POST", "/portal-token-reset-test", "", headers);
+    SimpleWeb::CaseInsensitiveMultimap headers;
+    headers.emplace("Authorization", create_auth_header("testuser", "testpass"));
+    headers.emplace("Origin", std::format("https://localhost:{}", port));
+    const auto response = client->request("POST", "/portal-token-reset-test", "", headers);
 
-  ASSERT_EQ(response->status_code, "200 OK");
-  EXPECT_TRUE(nlohmann::json::parse(response->content.string()).at("status").get<bool>());
-  EXPECT_FALSE(std::filesystem::exists(legacy_token));
-  EXPECT_FALSE(std::filesystem::exists(active_token));
-  EXPECT_EQ(portal::get_saved_token_path_for_testing(test_web_dir, "KDE"), active_token);
-  EXPECT_FALSE(std::filesystem::exists(active_token));
+    ASSERT_EQ(response->status_code, "200 OK");
+    EXPECT_TRUE(nlohmann::json::parse(response->content.string()).at("status").get<bool>());
+    EXPECT_FALSE(std::filesystem::exists(legacy_token));
+    EXPECT_FALSE(std::filesystem::exists(active_token));
+    EXPECT_EQ(portal::get_saved_token_path_for_testing(test_web_dir, "KDE"), active_token);
+    EXPECT_FALSE(std::filesystem::exists(active_token));
 }
 #endif
 
 // Test: confighttp::authenticate() rejects requests without auth header
 TEST_F(ConfigHttpTest, AuthenticateRejectsNoAuth) {
-  const auto response = client->request("GET", "/auth-test");
-  ASSERT_EQ(response->status_code, "401 Unauthorized");
+    const auto response = client->request("GET", "/auth-test");
+    ASSERT_EQ(response->status_code, "401 Unauthorized");
 
-  // Check for WWW-Authenticate header
-  const auto www_auth = response->header.find("WWW-Authenticate");
-  ASSERT_NE(www_auth, response->header.end());
+    // Check for WWW-Authenticate header
+    const auto www_auth = response->header.find("WWW-Authenticate");
+    ASSERT_NE(www_auth, response->header.end());
 }
 
 // Test: confighttp::authenticate() accepts valid credentials
 TEST_F(ConfigHttpTest, AuthenticateAcceptsValidCredentials) {
-  SimpleWeb::CaseInsensitiveMultimap headers;
-  headers.emplace("Authorization", create_auth_header("testuser", "testpass"));
+    SimpleWeb::CaseInsensitiveMultimap headers;
+    headers.emplace("Authorization", create_auth_header("testuser", "testpass"));
 
-  const auto response = client->request("GET", "/auth-test", "", headers);
-  ASSERT_EQ(response->status_code, "200 OK");
+    const auto response = client->request("GET", "/auth-test", "", headers);
+    ASSERT_EQ(response->status_code, "200 OK");
 
-  const std::string body = response->content.string();
-  ASSERT_EQ(body, "authenticated");
+    const std::string body = response->content.string();
+    ASSERT_EQ(body, "authenticated");
 }
 
 // Test: confighttp::authenticate() rejects invalid password
 TEST_F(ConfigHttpTest, AuthenticateRejectsInvalidPassword) {
-  SimpleWeb::CaseInsensitiveMultimap headers;
-  headers.emplace("Authorization", create_auth_header("testuser", "wrongpass"));
+    SimpleWeb::CaseInsensitiveMultimap headers;
+    headers.emplace("Authorization", create_auth_header("testuser", "wrongpass"));
 
-  const auto response = client->request("GET", "/auth-test", "", headers);
-  ASSERT_EQ(response->status_code, "401 Unauthorized");
+    const auto response = client->request("GET", "/auth-test", "", headers);
+    ASSERT_EQ(response->status_code, "401 Unauthorized");
 }
 
 // Test: confighttp::authenticate() is case-insensitive for username
 TEST_F(ConfigHttpTest, AuthenticateCaseInsensitiveUsername) {
-  SimpleWeb::CaseInsensitiveMultimap headers;
-  headers.emplace("Authorization", create_auth_header("TESTUSER", "testpass"));
+    SimpleWeb::CaseInsensitiveMultimap headers;
+    headers.emplace("Authorization", create_auth_header("TESTUSER", "testpass"));
 
-  const auto response = client->request("GET", "/auth-test", "", headers);
-  ASSERT_EQ(response->status_code, "200 OK");
+    const auto response = client->request("GET", "/auth-test", "", headers);
+    ASSERT_EQ(response->status_code, "200 OK");
 }
 
 // Test: confighttp::send_unauthorized() sends proper 401 response
 TEST_F(ConfigHttpTest, SendUnauthorizedResponse) {
-  const auto response = client->request("GET", "/unauthorized-test");
-  ASSERT_EQ(response->status_code, "401 Unauthorized");
+    const auto response = client->request("GET", "/unauthorized-test");
+    ASSERT_EQ(response->status_code, "401 Unauthorized");
 
-  // Check for WWW-Authenticate header
-  const auto www_auth = response->header.find("WWW-Authenticate");
-  ASSERT_NE(www_auth, response->header.end());
-  ASSERT_TRUE(www_auth->second.find("Basic realm") != std::string::npos);
+    // Check for WWW-Authenticate header
+    const auto www_auth = response->header.find("WWW-Authenticate");
+    ASSERT_NE(www_auth, response->header.end());
+    ASSERT_TRUE(www_auth->second.find("Basic realm") != std::string::npos);
 
-  // Check security headers
-  assert_security_headers(response);
+    // Check security headers
+    assert_security_headers(response);
 
-  // Check JSON response
-  const std::string body = response->content.string();
-  ASSERT_TRUE(body.find("Unauthorized") != std::string::npos);
-  ASSERT_TRUE(body.find("401") != std::string::npos);
+    // Check JSON response
+    const std::string body = response->content.string();
+    ASSERT_TRUE(body.find("Unauthorized") != std::string::npos);
+    ASSERT_TRUE(body.find("401") != std::string::npos);
 }
 
 // Test: confighttp::not_found() sends proper 404 response
 TEST_F(ConfigHttpTest, NotFoundResponse) {
-  const auto response = client->request("GET", "/notfound-test");
-  ASSERT_EQ(response->status_code, "404 Not Found");
-  assert_json_error_response(response, "Test not found", "404");
+    const auto response = client->request("GET", "/notfound-test");
+    ASSERT_EQ(response->status_code, "404 Not Found");
+    assert_json_error_response(response, "Test not found", "404");
 }
 
 // Test: confighttp::bad_request() sends proper 400 response
 TEST_F(ConfigHttpTest, BadRequestResponse) {
-  const auto response = client->request("GET", "/badrequest-test");
-  ASSERT_EQ(response->status_code, "400 Bad Request");
-  assert_json_error_response(response, "Test bad request", "400");
+    const auto response = client->request("GET", "/badrequest-test");
+    ASSERT_EQ(response->status_code, "400 Bad Request");
+    assert_json_error_response(response, "Test bad request", "400");
 }
 
 // Test: confighttp::send_response() sends proper JSON response
 TEST_F(ConfigHttpTest, SendResponseJson) {
-  const auto response = client->request("GET", "/json-test");
-  ASSERT_EQ(response->status_code, "200 OK");
+    const auto response = client->request("GET", "/json-test");
+    ASSERT_EQ(response->status_code, "200 OK");
 
-  // Check Content-Type
-  const auto content_type = response->header.find("Content-Type");
-  ASSERT_NE(content_type, response->header.end());
-  ASSERT_TRUE(content_type->second.find("application/json") != std::string::npos);
+    // Check Content-Type
+    const auto content_type = response->header.find("Content-Type");
+    ASSERT_NE(content_type, response->header.end());
+    ASSERT_TRUE(content_type->second.find("application/json") != std::string::npos);
 
-  // Check security headers
-  assert_security_headers(response);
+    // Check security headers
+    assert_security_headers(response);
 
-  // Check JSON content
-  const std::string body = response->content.string();
-  ASSERT_TRUE(body.find("\"status\":\"success\"") != std::string::npos || body.find("\"status\": \"success\"") != std::string::npos);
-  ASSERT_TRUE(body.find("Test JSON response") != std::string::npos);
-  ASSERT_TRUE(body.find("200") != std::string::npos);
+    // Check JSON content
+    const std::string body = response->content.string();
+    ASSERT_TRUE(body.find("\"status\":\"success\"") != std::string::npos || body.find("\"status\": \"success\"") != std::string::npos);
+    ASSERT_TRUE(body.find("Test JSON response") != std::string::npos);
+    ASSERT_TRUE(body.find("200") != std::string::npos);
 }
 
 // Test: confighttp::send_redirect() sends proper redirect response
 TEST_F(ConfigHttpTest, SendRedirectResponse) {
-  const auto response = client->request("GET", "/redirect-test");
-  ASSERT_EQ(response->status_code, "307 Temporary Redirect");
+    const auto response = client->request("GET", "/redirect-test");
+    ASSERT_EQ(response->status_code, "307 Temporary Redirect");
 
-  // Check Location header
-  const auto location = response->header.find("Location");
-  ASSERT_NE(location, response->header.end());
-  ASSERT_EQ(location->second, "/redirected-location");
+    // Check Location header
+    const auto location = response->header.find("Location");
+    ASSERT_NE(location, response->header.end());
+    ASSERT_EQ(location->second, "/redirected-location");
 
-  // Check security headers
-  assert_security_headers(response);
+    // Check security headers
+    assert_security_headers(response);
 }
 
 // Test: confighttp::check_content_type() accepts valid content type
 TEST_F(ConfigHttpTest, CheckContentTypeValid) {
-  SimpleWeb::CaseInsensitiveMultimap headers;
-  headers.emplace("Content-Type", "application/json");
+    SimpleWeb::CaseInsensitiveMultimap headers;
+    headers.emplace("Content-Type", "application/json");
 
-  const auto response = client->request("POST", "/content-type-test", "", headers);
-  ASSERT_EQ(response->status_code, "200 OK");
+    const auto response = client->request("POST", "/content-type-test", "", headers);
+    ASSERT_EQ(response->status_code, "200 OK");
 
-  const std::string body = response->content.string();
-  ASSERT_EQ(body, "content-type-valid");
+    const std::string body = response->content.string();
+    ASSERT_EQ(body, "content-type-valid");
 }
 
 // Test: confighttp::check_content_type() rejects missing content type
 TEST_F(ConfigHttpTest, CheckContentTypeMissing) {
-  const auto response = client->request("POST", "/content-type-test");
-  ASSERT_EQ(response->status_code, "400 Bad Request");
+    const auto response = client->request("POST", "/content-type-test");
+    ASSERT_EQ(response->status_code, "400 Bad Request");
 
-  const std::string body = response->content.string();
-  ASSERT_TRUE(body.find("Content type not provided") != std::string::npos);
+    const std::string body = response->content.string();
+    ASSERT_TRUE(body.find("Content type not provided") != std::string::npos);
 }
 
 // Test: confighttp::check_content_type() rejects wrong content type
 TEST_F(ConfigHttpTest, CheckContentTypeWrong) {
-  SimpleWeb::CaseInsensitiveMultimap headers;
-  headers.emplace("Content-Type", "text/plain");
+    SimpleWeb::CaseInsensitiveMultimap headers;
+    headers.emplace("Content-Type", "text/plain");
 
-  const auto response = client->request("POST", "/content-type-test", "", headers);
-  ASSERT_EQ(response->status_code, "400 Bad Request");
+    const auto response = client->request("POST", "/content-type-test", "", headers);
+    ASSERT_EQ(response->status_code, "400 Bad Request");
 
-  const std::string body = response->content.string();
-  ASSERT_TRUE(body.find("Content type mismatch") != std::string::npos);
+    const std::string body = response->content.string();
+    ASSERT_TRUE(body.find("Content type mismatch") != std::string::npos);
 }
 
 // Test: confighttp::check_content_type() handles content type with charset
 TEST_F(ConfigHttpTest, CheckContentTypeWithCharset) {
-  SimpleWeb::CaseInsensitiveMultimap headers;
-  headers.emplace("Content-Type", "application/json; charset=utf-8");
+    SimpleWeb::CaseInsensitiveMultimap headers;
+    headers.emplace("Content-Type", "application/json; charset=utf-8");
 
-  const auto response = client->request("POST", "/content-type-test", "", headers);
-  ASSERT_EQ(response->status_code, "200 OK");
+    const auto response = client->request("POST", "/content-type-test", "", headers);
+    ASSERT_EQ(response->status_code, "200 OK");
 
-  const std::string body = response->content.string();
-  ASSERT_EQ(body, "content-type-valid");
+    const std::string body = response->content.string();
+    ASSERT_EQ(body, "content-type-valid");
 }
 
 // Test: CSRF token generation
 TEST_F(ConfigHttpTest, CSRFTokenGeneration) {
-  SimpleWeb::CaseInsensitiveMultimap headers;
-  headers.emplace("Authorization", create_auth_header("testuser", "testpass"));
+    SimpleWeb::CaseInsensitiveMultimap headers;
+    headers.emplace("Authorization", create_auth_header("testuser", "testpass"));
 
-  const auto response = client->request("GET", "/csrf-token-test", "", headers);
-  ASSERT_EQ(response->status_code, "200 OK");
+    const auto response = client->request("GET", "/csrf-token-test", "", headers);
+    ASSERT_EQ(response->status_code, "200 OK");
 
-  const std::string body = response->content.string();
-  nlohmann::json json_body = nlohmann::json::parse(body);
+    const std::string body = response->content.string();
+    nlohmann::json json_body = nlohmann::json::parse(body);
 
-  ASSERT_TRUE(json_body.contains("csrf_token"));
-  ASSERT_FALSE(json_body["csrf_token"].get<std::string>().empty());
+    ASSERT_TRUE(json_body.contains("csrf_token"));
+    ASSERT_FALSE(json_body["csrf_token"].get<std::string>().empty());
 
-  // Token should be 32 characters (CSRF_TOKEN_SIZE)
-  ASSERT_EQ(json_body["csrf_token"].get<std::string>().length(), 32);
+    // Token should be 32 characters (CSRF_TOKEN_SIZE)
+    ASSERT_EQ(json_body["csrf_token"].get<std::string>().length(), 32);
 }
 
 // Test: CSRF token validation with valid token in header
 TEST_F(ConfigHttpTest, CSRFValidationWithValidTokenInHeader) {
-  SimpleWeb::CaseInsensitiveMultimap auth_headers;
-  auth_headers.emplace("Authorization", create_auth_header("testuser", "testpass"));
+    SimpleWeb::CaseInsensitiveMultimap auth_headers;
+    auth_headers.emplace("Authorization", create_auth_header("testuser", "testpass"));
 
-  // First, get a CSRF token
-  const auto token_response = client->request("GET", "/csrf-token-test", "", auth_headers);
-  ASSERT_EQ(token_response->status_code, "200 OK");
+    // First, get a CSRF token
+    const auto token_response = client->request("GET", "/csrf-token-test", "", auth_headers);
+    ASSERT_EQ(token_response->status_code, "200 OK");
 
-  const std::string token_body = token_response->content.string();
-  nlohmann::json token_json = nlohmann::json::parse(token_body);
-  std::string csrf_token = token_json["csrf_token"].get<std::string>();
+    const std::string token_body = token_response->content.string();
+    nlohmann::json token_json = nlohmann::json::parse(token_body);
+    std::string csrf_token = token_json["csrf_token"].get<std::string>();
 
-  // Now make a POST request with the token
-  SimpleWeb::CaseInsensitiveMultimap headers;
-  headers.emplace("Authorization", create_auth_header("testuser", "testpass"));
-  headers.emplace("X-CSRF-Token", csrf_token);
+    // Now make a POST request with the token
+    SimpleWeb::CaseInsensitiveMultimap headers;
+    headers.emplace("Authorization", create_auth_header("testuser", "testpass"));
+    headers.emplace("X-CSRF-Token", csrf_token);
 
-  const auto response = client->request("POST", "/csrf-validate-test", "", headers);
-  ASSERT_EQ(response->status_code, "200 OK");
+    const auto response = client->request("POST", "/csrf-validate-test", "", headers);
+    ASSERT_EQ(response->status_code, "200 OK");
 
-  const std::string body = response->content.string();
-  ASSERT_EQ(body, "csrf-valid");
+    const std::string body = response->content.string();
+    ASSERT_EQ(body, "csrf-valid");
 }
 
 // Test: CSRF token validation with missing token (cross-origin request)
 TEST_F(ConfigHttpTest, CSRFValidationWithMissingToken) {
-  SimpleWeb::CaseInsensitiveMultimap headers;
-  headers.emplace("Authorization", create_auth_header("testuser", "testpass"));
-  // Don't set Origin or Referer - this simulates a request that doesn't match allowed origins
-  // The server will require CSRF token
+    SimpleWeb::CaseInsensitiveMultimap headers;
+    headers.emplace("Authorization", create_auth_header("testuser", "testpass"));
+    // Don't set Origin or Referer - this simulates a request that doesn't match allowed origins
+    // The server will require CSRF token
 
-  const auto response = client->request("POST", "/csrf-validate-test", "", headers);
+    const auto response = client->request("POST", "/csrf-validate-test", "", headers);
 
-  // The test might pass as same-origin if Simple-Web-Server adds headers automatically
-  // In that case, we need to explicitly block same-origin by using a custom validation route
-  // For now, if it passes, that's OK - it means same-origin is working
-  // This test is more about the API than the actual enforcement
-  if (response->status_code == "200 OK") {
-    // Same-origin was detected automatically - test passes
-    SUCCEED();
-  } else {
-    // CSRF token was required
-    ASSERT_EQ(response->status_code, "400 Bad Request");
-    const std::string body = response->content.string();
-    ASSERT_TRUE(body.find("Missing CSRF token") != std::string::npos);
-  }
+    // The test might pass as same-origin if Simple-Web-Server adds headers automatically
+    // In that case, we need to explicitly block same-origin by using a custom validation route
+    // For now, if it passes, that's OK - it means same-origin is working
+    // This test is more about the API than the actual enforcement
+    if (response->status_code == "200 OK") {
+      // Same-origin was detected automatically - test passes
+      SUCCEED();
+    } else {
+      // CSRF token was required
+      ASSERT_EQ(response->status_code, "400 Bad Request");
+      const std::string body = response->content.string();
+      ASSERT_TRUE(body.find("Missing CSRF token") != std::string::npos);
+    }
 }
 
 // Test: CSRF token validation with invalid token (cross-origin request)
 TEST_F(ConfigHttpTest, CSRFValidationWithInvalidToken) {
-  SimpleWeb::CaseInsensitiveMultimap headers;
-  headers.emplace("Authorization", create_auth_header("testuser", "testpass"));
-  // Don't set Origin or Referer - force CSRF validation
-  headers.emplace("X-CSRF-Token", "invalid_token_12345678901234567890");
+    SimpleWeb::CaseInsensitiveMultimap headers;
+    headers.emplace("Authorization", create_auth_header("testuser", "testpass"));
+    // Don't set Origin or Referer - force CSRF validation
+    headers.emplace("X-CSRF-Token", "invalid_token_12345678901234567890");
 
-  const auto response = client->request("POST", "/csrf-validate-test", "", headers);
+    const auto response = client->request("POST", "/csrf-validate-test", "", headers);
 
-  // Similar to above - if same-origin is detected, test passes
-  if (response->status_code == "200 OK") {
-    SUCCEED();
-  } else {
-    ASSERT_EQ(response->status_code, "400 Bad Request");
-    const std::string body = response->content.string();
-    ASSERT_TRUE(body.find("Invalid CSRF token") != std::string::npos);
-  }
+    // Similar to above - if same-origin is detected, test passes
+    if (response->status_code == "200 OK") {
+      SUCCEED();
+    } else {
+      ASSERT_EQ(response->status_code, "400 Bad Request");
+      const std::string body = response->content.string();
+      ASSERT_TRUE(body.find("Invalid CSRF token") != std::string::npos);
+    }
 }
 
 // Test: CSRF same-origin exemption with Origin header
 TEST_F(ConfigHttpTest, CSRFSameOriginExemptionWithOrigin) {
-  SimpleWeb::CaseInsensitiveMultimap headers;
-  headers.emplace("Authorization", create_auth_header("testuser", "testpass"));
-  headers.emplace("Origin", std::format("https://localhost:{}", port));
+    SimpleWeb::CaseInsensitiveMultimap headers;
+    headers.emplace("Authorization", create_auth_header("testuser", "testpass"));
+    headers.emplace("Origin", std::format("https://localhost:{}", port));
 
-  // Make a POST request without CSRF token but with same-origin Origin header
-  const auto response = client->request("POST", "/csrf-validate-test", "", headers);
-  ASSERT_EQ(response->status_code, "200 OK");
+    // Make a POST request without CSRF token but with same-origin Origin header
+    const auto response = client->request("POST", "/csrf-validate-test", "", headers);
+    ASSERT_EQ(response->status_code, "200 OK");
 
-  const std::string body = response->content.string();
-  ASSERT_EQ(body, "csrf-valid");
+    const std::string body = response->content.string();
+    ASSERT_EQ(body, "csrf-valid");
 }
 
 // Test: CSRF same-origin exemption with Referer header
 TEST_F(ConfigHttpTest, CSRFSameOriginExemptionWithReferer) {
-  SimpleWeb::CaseInsensitiveMultimap headers;
-  headers.emplace("Authorization", create_auth_header("testuser", "testpass"));
-  headers.emplace("Referer", std::format("https://localhost:{}/some/page", port));
+    SimpleWeb::CaseInsensitiveMultimap headers;
+    headers.emplace("Authorization", create_auth_header("testuser", "testpass"));
+    headers.emplace("Referer", std::format("https://localhost:{}/some/page", port));
 
-  // Make a POST request without CSRF token but with same-origin Referer header
-  const auto response = client->request("POST", "/csrf-validate-test", "", headers);
-  ASSERT_EQ(response->status_code, "200 OK");
+    // Make a POST request without CSRF token but with same-origin Referer header
+    const auto response = client->request("POST", "/csrf-validate-test", "", headers);
+    ASSERT_EQ(response->status_code, "200 OK");
 
-  const std::string body = response->content.string();
-  ASSERT_EQ(body, "csrf-valid");
+    const std::string body = response->content.string();
+    ASSERT_EQ(body, "csrf-valid");
 }
 
 // Test: confighttp::getPage() serves HTML with authentication
 TEST_F(ConfigHttpTest, GetPageWithAuth) {
-  SimpleWeb::CaseInsensitiveMultimap headers;
-  headers.emplace("Authorization", create_auth_header("testuser", "testpass"));
+    SimpleWeb::CaseInsensitiveMultimap headers;
+    headers.emplace("Authorization", create_auth_header("testuser", "testpass"));
 
-  const auto response = client->request("GET", "/page-test", "", headers);
-  ASSERT_EQ(response->status_code, "200 OK");
+    const auto response = client->request("GET", "/page-test", "", headers);
+    ASSERT_EQ(response->status_code, "200 OK");
 
-  // Check Content-Type
-  const auto content_type = response->header.find("Content-Type");
-  ASSERT_NE(content_type, response->header.end());
-  ASSERT_TRUE(content_type->second.find("text/html") != std::string::npos);
-  ASSERT_TRUE(content_type->second.find("charset=utf-8") != std::string::npos);
+    // Check Content-Type
+    const auto content_type = response->header.find("Content-Type");
+    ASSERT_NE(content_type, response->header.end());
+    ASSERT_TRUE(content_type->second.find("text/html") != std::string::npos);
+    ASSERT_TRUE(content_type->second.find("charset=utf-8") != std::string::npos);
 
-  // Check security headers
-  assert_security_headers(response);
+    // Check security headers
+    assert_security_headers(response);
 
-  // Check HTML content
-  const std::string body = response->content.string();
-  ASSERT_TRUE(body.find("<html>") != std::string::npos);
-  ASSERT_TRUE(body.find("Test Page Content") != std::string::npos);
-  ASSERT_TRUE(body.find("</html>") != std::string::npos);
+    // Check HTML content
+    const std::string body = response->content.string();
+    ASSERT_TRUE(body.find("<html>") != std::string::npos);
+    ASSERT_TRUE(body.find("Test Page Content") != std::string::npos);
+    ASSERT_TRUE(body.find("</html>") != std::string::npos);
 }
 
 // Test: confighttp::getPage() works without authentication when require_auth=false
 TEST_F(ConfigHttpTest, GetPageWithoutAuthRequired) {
-  const auto response = client->request("GET", "/page-noauth-test");
-  ASSERT_EQ(response->status_code, "200 OK");
+    const auto response = client->request("GET", "/page-noauth-test");
+    ASSERT_EQ(response->status_code, "200 OK");
 
-  // Check HTML content is served
-  const std::string body = response->content.string();
-  ASSERT_TRUE(body.find("Test Page Content") != std::string::npos);
+    // Check HTML content is served
+    const std::string body = response->content.string();
+    ASSERT_TRUE(body.find("Test Page Content") != std::string::npos);
 }
 
 // Test: confighttp::getPage() redirects when redirect_if_username=true and username is set
 TEST_F(ConfigHttpTest, GetPageRedirectsWhenUsernameSet) {
-  // Username is set in SetUp(), so redirect_if_username should trigger redirect
-  const auto response = client->request("GET", "/page-redirect-test");
-  ASSERT_EQ(response->status_code, "307 Temporary Redirect");
+    // Username is set in SetUp(), so redirect_if_username should trigger redirect
+    const auto response = client->request("GET", "/page-redirect-test");
+    ASSERT_EQ(response->status_code, "307 Temporary Redirect");
 
-  // Check redirect location
-  const auto location = response->header.find("Location");
-  ASSERT_NE(location, response->header.end());
-  ASSERT_EQ(location->second, "/");
+    // Check redirect location
+    const auto location = response->header.find("Location");
+    ASSERT_NE(location, response->header.end());
+    ASSERT_EQ(location->second, "/");
 }
 
 // Test: confighttp::getPage() doesn't redirect when username is empty
 TEST_F(ConfigHttpTest, GetPageNoRedirectWhenUsernameEmpty) {
-  // Temporarily clear username
-  const std::string saved = config::sunshine.username;
-  config::sunshine.username = "";
+    // Temporarily clear username
+    const std::string saved = config::sunshine.username;
+    config::sunshine.username = "";
 
-  const auto response = client->request("GET", "/page-redirect-test");
-  ASSERT_EQ(response->status_code, "200 OK");
+    const auto response = client->request("GET", "/page-redirect-test");
+    ASSERT_EQ(response->status_code, "200 OK");
 
-  // Restore username
-  config::sunshine.username = saved;
+    // Restore username
+    config::sunshine.username = saved;
 }
 
 // Test: browser routes fall back to the SPA entry document
 TEST_F(ConfigHttpTest, BrowserRouteFallsBackToSpaEntry) {
-  SimpleWeb::CaseInsensitiveMultimap headers;
-  headers.emplace("Authorization", create_auth_header("testuser", "testpass"));
+    SimpleWeb::CaseInsensitiveMultimap headers;
+    headers.emplace("Authorization", create_auth_header("testuser", "testpass"));
 
-  for (const std::string_view path : {"/future-browser-route", "/apiary", "/assets2"}) {
-    const auto response = client->request("GET", std::string {path}, "", headers);
-    EXPECT_EQ(response->status_code, "200 OK") << path;
-    EXPECT_NE(response->content.string().find("Test Page Content"), std::string::npos) << path;
-  }
+    for (const std::string_view path : {"/future-browser-route", "/apiary", "/assets2"}) {
+      const auto response = client->request("GET", std::string {path}, "", headers);
+      EXPECT_EQ(response->status_code, "200 OK") << path;
+      EXPECT_NE(response->content.string().find("Test Page Content"), std::string::npos) << path;
+    }
 }
 
 // Test: server-owned route prefixes retain 404 behavior instead of returning the SPA
 TEST_F(ConfigHttpTest, ServerResourcePrefixesDoNotFallBackToSpaEntry) {
-  for (const std::string_view path : {"/api", "/api/unknown", "/assets", "/assets/missing.js", "/images", "/images/missing.png"}) {
-    const auto response = client->request("GET", std::string {path});
-    EXPECT_EQ(response->status_code, "404 Not Found") << path;
-  }
+    for (const std::string_view path : {"/api", "/api/unknown", "/assets", "/assets/missing.js", "/images", "/images/missing.png"}) {
+      const auto response = client->request("GET", std::string {path});
+      EXPECT_EQ(response->status_code, "404 Not Found") << path;
+    }
 }
 
 // Test: confighttp::getLocale() returns locale JSON
 TEST_F(ConfigHttpTest, GetLocaleReturnsJson) {
-  const auto response = client->request("GET", "/locale-test");
-  ASSERT_EQ(response->status_code, "200 OK");
+    const auto response = client->request("GET", "/locale-test");
+    ASSERT_EQ(response->status_code, "200 OK");
 
-  // Check Content-Type
-  const auto content_type = response->header.find("Content-Type");
-  ASSERT_NE(content_type, response->header.end());
-  ASSERT_TRUE(content_type->second.find("application/json") != std::string::npos);
+    // Check Content-Type
+    const auto content_type = response->header.find("Content-Type");
+    ASSERT_NE(content_type, response->header.end());
+    ASSERT_TRUE(content_type->second.find("application/json") != std::string::npos);
 
-  // Check security headers
-  assert_security_headers(response);
+    // Check security headers
+    assert_security_headers(response);
 
-  // Check JSON content
-  const std::string body = response->content.string();
-  ASSERT_TRUE(body.find("\"status\":true") != std::string::npos || body.find("\"status\": true") != std::string::npos);
-  ASSERT_TRUE(body.find("\"locale\":\"en\"") != std::string::npos || body.find("\"locale\": \"en\"") != std::string::npos);
+    // Check JSON content
+    const std::string body = response->content.string();
+    ASSERT_TRUE(body.find("\"status\":true") != std::string::npos || body.find("\"status\": true") != std::string::npos);
+    ASSERT_TRUE(body.find("\"locale\":\"en\"") != std::string::npos || body.find("\"locale\": \"en\"") != std::string::npos);
 }
 
 /**
@@ -1169,686 +1103,470 @@ TEST_F(ConfigHttpTest, GetLocaleReturnsJson) {
  *   └── test_exec[.exe]   (executable file)
  */
 class BrowseDirectoryTest: public ConfigHttpTest {  // NOSONAR(cpp:S3656): protected members are intentional for test fixture subclassing
-protected:
-  std::filesystem::path browse_test_dir;
+  protected:
+    std::filesystem::path browse_test_dir;
 
-  void SetUp() override {
-    ConfigHttpTest::SetUp();
+    void SetUp() override {
+      ConfigHttpTest::SetUp();
 
-    browse_test_dir = std::filesystem::temp_directory_path() / "sunshine_browse_test";  // NOSONAR(cpp:S5443): safe for tests
+      browse_test_dir = std::filesystem::temp_directory_path() / "sunshine_browse_test";  // NOSONAR(cpp:S5443): safe for tests
 
-    // Remove any leftover directory from a previous interrupted run
-    if (std::filesystem::exists(browse_test_dir)) {
-      std::filesystem::remove_all(browse_test_dir);
-    }
+      // Remove any leftover directory from a previous interrupted run
+      if (std::filesystem::exists(browse_test_dir)) {
+        std::filesystem::remove_all(browse_test_dir);
+      }
 
-    std::filesystem::create_directories(browse_test_dir / "subdir_a");
-    std::filesystem::create_directories(browse_test_dir / "subdir_b");
-    std::ofstream(browse_test_dir / "file_alpha.txt") << "alpha";
-    std::ofstream(browse_test_dir / "file_beta.txt") << "beta";
+      std::filesystem::create_directories(browse_test_dir / "subdir_a");
+      std::filesystem::create_directories(browse_test_dir / "subdir_b");
+      std::ofstream(browse_test_dir / "file_alpha.txt") << "alpha";
+      std::ofstream(browse_test_dir / "file_beta.txt") << "beta";
 
 #ifdef _WIN32
-    std::ofstream(browse_test_dir / "test_exec.exe") << "fake exe";
+      std::ofstream(browse_test_dir / "test_exec.exe") << "fake exe";
 #else
-    const auto exec_file = browse_test_dir / "test_exec";
-    std::ofstream(exec_file) << "#!/bin/sh\necho hello";
-    std::filesystem::permissions(
-      exec_file,
-      std::filesystem::perms::owner_read | std::filesystem::perms::owner_write | std::filesystem::perms::owner_exec,
-      std::filesystem::perm_options::replace
-    );
+      const auto exec_file = browse_test_dir / "test_exec";
+      std::ofstream(exec_file) << "#!/bin/sh\necho hello";
+      std::filesystem::permissions(
+        exec_file,
+        std::filesystem::perms::owner_read | std::filesystem::perms::owner_write | std::filesystem::perms::owner_exec,
+        std::filesystem::perm_options::replace
+      );
 #endif
-  }
-
-  void TearDown() override {
-    if (std::filesystem::exists(browse_test_dir)) {
-      std::filesystem::remove_all(browse_test_dir);
     }
-    ConfigHttpTest::TearDown();
-  }
 
-  /**
-   * @brief URL-encodes a single query-parameter value.
-   *
-   * All characters except unreserved ones (RFC 3986) are percent-encoded so
-   * that slashes, backslashes, colons, etc. in filesystem paths are
-   * transmitted correctly.
-   */
-  static std::string url_encode_param(const std::string &str) {
-    std::string encoded;
-    for (const unsigned char c : str) {
-      if (std::isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~') {
-        encoded += static_cast<char>(c);
-      } else {
-        encoded += std::format("%{:02X}", static_cast<int>(c));
+    void TearDown() override {
+      if (std::filesystem::exists(browse_test_dir)) {
+        std::filesystem::remove_all(browse_test_dir);
       }
+      ConfigHttpTest::TearDown();
     }
-    return encoded;
-  }
 
-  /**
-   * @brief Builds the /browse-test URL with optional path and type query params.
-   */
-  std::string browse_url(const std::string &path = "", const std::string &type = "") const {
-    std::string url = "/browse-test";
-    std::string sep = "?";
-    if (!path.empty()) {
-      url += sep + "path=" + url_encode_param(path);
-      sep = "&";
+    /**
+     * @brief URL-encodes a single query-parameter value.
+     *
+     * All characters except unreserved ones (RFC 3986) are percent-encoded so
+     * that slashes, backslashes, colons, etc. in filesystem paths are
+     * transmitted correctly.
+     */
+    static std::string url_encode_param(const std::string &str) {
+      std::string encoded;
+      for (const unsigned char c : str) {
+        if (std::isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~') {
+          encoded += static_cast<char>(c);
+        } else {
+          encoded += std::format("%{:02X}", static_cast<int>(c));
+        }
+      }
+      return encoded;
     }
-    if (!type.empty()) {
-      url += sep + "type=" + type;
-    }
-    return url;
-  }
 
-  /**
-   * @brief Helper: locate an entry by name in the JSON entries array.
-   */
-  static nlohmann::json::const_iterator find_entry(const nlohmann::json &entries, const std::string &name) {
-    return std::ranges::find_if(entries, [&name](const nlohmann::json &e) {
-      return e.at("name").get<std::string>() == name;
-    });
-  }
+    /**
+     * @brief Builds the /browse-test URL with optional path and type query params.
+     */
+    std::string browse_url(const std::string &path = "", const std::string &type = "") const {
+      std::string url = "/browse-test";
+      std::string sep = "?";
+      if (!path.empty()) {
+        url += sep + "path=" + url_encode_param(path);
+        sep = "&";
+      }
+      if (!type.empty()) {
+        url += sep + "type=" + type;
+      }
+      return url;
+    }
+
+    /**
+     * @brief Helper: locate an entry by name in the JSON entries array.
+     */
+    static nlohmann::json::const_iterator find_entry(const nlohmann::json &entries, const std::string &name) {
+      return std::ranges::find_if(entries, [&name](const nlohmann::json &e) {
+        return e.at("name").get<std::string>() == name;
+      });
+    }
 };
 
 // Test: browseDirectory returns 200 with valid JSON for a real directory
 TEST_F(BrowseDirectoryTest, BrowseListsValidDirectory) {
-  SimpleWeb::CaseInsensitiveMultimap headers;
-  headers.emplace("Authorization", create_auth_header("testuser", "testpass"));
+    SimpleWeb::CaseInsensitiveMultimap headers;
+    headers.emplace("Authorization", create_auth_header("testuser", "testpass"));
 
-  const auto response = client->request("GET", browse_url(browse_test_dir.string()), "", headers);
-  ASSERT_EQ(response->status_code, "200 OK");
+    const auto response = client->request("GET", browse_url(browse_test_dir.string()), "", headers);
+    ASSERT_EQ(response->status_code, "200 OK");
 
-  const auto content_type = response->header.find("Content-Type");
-  ASSERT_NE(content_type, response->header.end());
-  ASSERT_TRUE(content_type->second.find("application/json") != std::string::npos);
+    const auto content_type = response->header.find("Content-Type");
+    ASSERT_NE(content_type, response->header.end());
+    ASSERT_TRUE(content_type->second.find("application/json") != std::string::npos);
 
-  assert_security_headers(response);
+    assert_security_headers(response);
 
-  const nlohmann::json json = nlohmann::json::parse(response->content.string());
-  ASSERT_TRUE(json.contains("path"));
-  ASSERT_TRUE(json.contains("parent"));
-  ASSERT_TRUE(json.contains("entries"));
-  ASSERT_TRUE(json["entries"].is_array());
+    const nlohmann::json json = nlohmann::json::parse(response->content.string());
+    ASSERT_TRUE(json.contains("path"));
+    ASSERT_TRUE(json.contains("parent"));
+    ASSERT_TRUE(json.contains("entries"));
+    ASSERT_TRUE(json["entries"].is_array());
 }
 
 // Test: returned 'path' field matches the requested directory
 TEST_F(BrowseDirectoryTest, BrowseResponsePathMatchesRequest) {
-  SimpleWeb::CaseInsensitiveMultimap headers;
-  headers.emplace("Authorization", create_auth_header("testuser", "testpass"));
+    SimpleWeb::CaseInsensitiveMultimap headers;
+    headers.emplace("Authorization", create_auth_header("testuser", "testpass"));
 
-  const auto response = client->request("GET", browse_url(browse_test_dir.string()), "", headers);
-  ASSERT_EQ(response->status_code, "200 OK");
+    const auto response = client->request("GET", browse_url(browse_test_dir.string()), "", headers);
+    ASSERT_EQ(response->status_code, "200 OK");
 
-  const nlohmann::json json = nlohmann::json::parse(response->content.string());
-  const std::filesystem::path returned = std::filesystem::weakly_canonical(json["path"].get<std::string>());
-  const std::filesystem::path expected = std::filesystem::weakly_canonical(browse_test_dir);
-  ASSERT_EQ(returned, expected);
+    const nlohmann::json json = nlohmann::json::parse(response->content.string());
+    const std::filesystem::path returned = std::filesystem::weakly_canonical(json["path"].get<std::string>());
+    const std::filesystem::path expected = std::filesystem::weakly_canonical(browse_test_dir);
+    ASSERT_EQ(returned, expected);
 }
 
 // Test: returned 'parent' field is the parent of 'path'
 TEST_F(BrowseDirectoryTest, BrowseResponseParentIsCorrect) {
-  SimpleWeb::CaseInsensitiveMultimap headers;
-  headers.emplace("Authorization", create_auth_header("testuser", "testpass"));
+    SimpleWeb::CaseInsensitiveMultimap headers;
+    headers.emplace("Authorization", create_auth_header("testuser", "testpass"));
 
-  const auto response = client->request("GET", browse_url(browse_test_dir.string()), "", headers);
-  ASSERT_EQ(response->status_code, "200 OK");
+    const auto response = client->request("GET", browse_url(browse_test_dir.string()), "", headers);
+    ASSERT_EQ(response->status_code, "200 OK");
 
-  const nlohmann::json json = nlohmann::json::parse(response->content.string());
-  const std::filesystem::path returned_path(json["path"].get<std::string>());
-  const std::filesystem::path returned_parent(json["parent"].get<std::string>());
-  ASSERT_EQ(returned_parent, returned_path.parent_path());
+    const nlohmann::json json = nlohmann::json::parse(response->content.string());
+    const std::filesystem::path returned_path(json["path"].get<std::string>());
+    const std::filesystem::path returned_parent(json["parent"].get<std::string>());
+    ASSERT_EQ(returned_parent, returned_path.parent_path());
 }
 
 // Test: entries contain the expected subdirectories and files with correct types
 TEST_F(BrowseDirectoryTest, BrowseResponseContainsExpectedEntries) {
-  SimpleWeb::CaseInsensitiveMultimap headers;
-  headers.emplace("Authorization", create_auth_header("testuser", "testpass"));
+    SimpleWeb::CaseInsensitiveMultimap headers;
+    headers.emplace("Authorization", create_auth_header("testuser", "testpass"));
 
-  const auto response = client->request("GET", browse_url(browse_test_dir.string()), "", headers);
-  ASSERT_EQ(response->status_code, "200 OK");
+    const auto response = client->request("GET", browse_url(browse_test_dir.string()), "", headers);
+    ASSERT_EQ(response->status_code, "200 OK");
 
-  const nlohmann::json json = nlohmann::json::parse(response->content.string());
-  const auto &entries = json["entries"];
+    const nlohmann::json json = nlohmann::json::parse(response->content.string());
+    const auto &entries = json["entries"];
 
-  const auto subdir_a = find_entry(entries, "subdir_a");
-  ASSERT_NE(subdir_a, entries.end());
-  ASSERT_EQ((*subdir_a)["type"].get<std::string>(), "directory");
+    const auto subdir_a = find_entry(entries, "subdir_a");
+    ASSERT_NE(subdir_a, entries.end());
+    ASSERT_EQ((*subdir_a)["type"].get<std::string>(), "directory");
 
-  const auto subdir_b = find_entry(entries, "subdir_b");
-  ASSERT_NE(subdir_b, entries.end());
-  ASSERT_EQ((*subdir_b)["type"].get<std::string>(), "directory");
+    const auto subdir_b = find_entry(entries, "subdir_b");
+    ASSERT_NE(subdir_b, entries.end());
+    ASSERT_EQ((*subdir_b)["type"].get<std::string>(), "directory");
 
-  const auto file_alpha = find_entry(entries, "file_alpha.txt");
-  ASSERT_NE(file_alpha, entries.end());
-  ASSERT_EQ((*file_alpha)["type"].get<std::string>(), "file");
+    const auto file_alpha = find_entry(entries, "file_alpha.txt");
+    ASSERT_NE(file_alpha, entries.end());
+    ASSERT_EQ((*file_alpha)["type"].get<std::string>(), "file");
 
-  const auto file_beta = find_entry(entries, "file_beta.txt");
-  ASSERT_NE(file_beta, entries.end());
-  ASSERT_EQ((*file_beta)["type"].get<std::string>(), "file");
+    const auto file_beta = find_entry(entries, "file_beta.txt");
+    ASSERT_NE(file_beta, entries.end());
+    ASSERT_EQ((*file_beta)["type"].get<std::string>(), "file");
 }
 
 // Test: every entry has non-empty 'name', 'type', and 'path' fields
 TEST_F(BrowseDirectoryTest, BrowseEntryFieldsArePresent) {
-  SimpleWeb::CaseInsensitiveMultimap headers;
-  headers.emplace("Authorization", create_auth_header("testuser", "testpass"));
+    SimpleWeb::CaseInsensitiveMultimap headers;
+    headers.emplace("Authorization", create_auth_header("testuser", "testpass"));
 
-  const auto response = client->request("GET", browse_url(browse_test_dir.string()), "", headers);
-  ASSERT_EQ(response->status_code, "200 OK");
+    const auto response = client->request("GET", browse_url(browse_test_dir.string()), "", headers);
+    ASSERT_EQ(response->status_code, "200 OK");
 
-  const nlohmann::json json = nlohmann::json::parse(response->content.string());
-  for (const auto &entry : json["entries"]) {
-    ASSERT_TRUE(entry.contains("name"));
-    ASSERT_TRUE(entry.contains("type"));
-    ASSERT_TRUE(entry.contains("path"));
-    ASSERT_FALSE(entry["name"].get<std::string>().empty());
-    ASSERT_FALSE(entry["path"].get<std::string>().empty());
-    const auto type = entry["type"].get<std::string>();
-    ASSERT_TRUE(type == "directory" || type == "file");
-  }
+    const nlohmann::json json = nlohmann::json::parse(response->content.string());
+    for (const auto &entry : json["entries"]) {
+      ASSERT_TRUE(entry.contains("name"));
+      ASSERT_TRUE(entry.contains("type"));
+      ASSERT_TRUE(entry.contains("path"));
+      ASSERT_FALSE(entry["name"].get<std::string>().empty());
+      ASSERT_FALSE(entry["path"].get<std::string>().empty());
+      const auto type = entry["type"].get<std::string>();
+      ASSERT_TRUE(type == "directory" || type == "file");
+    }
 }
 
 // Test: entries are sorted – all directories appear before any file
 TEST_F(BrowseDirectoryTest, BrowseEntriesSortedDirsFirst) {
-  SimpleWeb::CaseInsensitiveMultimap headers;
-  headers.emplace("Authorization", create_auth_header("testuser", "testpass"));
+    SimpleWeb::CaseInsensitiveMultimap headers;
+    headers.emplace("Authorization", create_auth_header("testuser", "testpass"));
 
-  const auto response = client->request("GET", browse_url(browse_test_dir.string()), "", headers);
-  ASSERT_EQ(response->status_code, "200 OK");
+    const auto response = client->request("GET", browse_url(browse_test_dir.string()), "", headers);
+    ASSERT_EQ(response->status_code, "200 OK");
 
-  const nlohmann::json json = nlohmann::json::parse(response->content.string());
-  bool seen_file = false;
-  for (const auto &entry : json["entries"]) {
-    const std::string type = entry["type"].get<std::string>();
-    if (type == "file") {
-      seen_file = true;
-    } else if (type == "directory") {
-      ASSERT_FALSE(seen_file) << "Directory '" << entry["name"] << "' appears after a file in the listing";
+    const nlohmann::json json = nlohmann::json::parse(response->content.string());
+    bool seen_file = false;
+    for (const auto &entry : json["entries"]) {
+      const std::string type = entry["type"].get<std::string>();
+      if (type == "file") {
+        seen_file = true;
+      } else if (type == "directory") {
+        ASSERT_FALSE(seen_file) << "Directory '" << entry["name"] << "' appears after a file in the listing";
+      }
     }
-  }
 }
 
 // Test: entries within each group (dirs / files) are sorted case-insensitively
 TEST_F(BrowseDirectoryTest, BrowseEntriesSortedAlphabeticallyWithinGroups) {
-  SimpleWeb::CaseInsensitiveMultimap headers;
-  headers.emplace("Authorization", create_auth_header("testuser", "testpass"));
+    SimpleWeb::CaseInsensitiveMultimap headers;
+    headers.emplace("Authorization", create_auth_header("testuser", "testpass"));
 
-  const auto response = client->request("GET", browse_url(browse_test_dir.string()), "", headers);
-  ASSERT_EQ(response->status_code, "200 OK");
+    const auto response = client->request("GET", browse_url(browse_test_dir.string()), "", headers);
+    ASSERT_EQ(response->status_code, "200 OK");
 
-  const nlohmann::json json = nlohmann::json::parse(response->content.string());
-  std::string prev_dir;
-  std::string prev_file;
-  for (const auto &entry : json["entries"]) {
-    std::string name = entry["name"].get<std::string>();
-    std::ranges::transform(name, name.begin(), ::tolower);
+    const nlohmann::json json = nlohmann::json::parse(response->content.string());
+    std::string prev_dir;
+    std::string prev_file;
+    for (const auto &entry : json["entries"]) {
+      std::string name = entry["name"].get<std::string>();
+      std::ranges::transform(name, name.begin(), ::tolower);
 
-    if (entry["type"] == "directory") {
-      if (!prev_dir.empty()) {
-        ASSERT_LE(prev_dir, name) << "Directories are not in alphabetical order";
+      if (entry["type"] == "directory") {
+        if (!prev_dir.empty()) {
+          ASSERT_LE(prev_dir, name) << "Directories are not in alphabetical order";
+        }
+        prev_dir = name;
+      } else {
+        if (!prev_file.empty()) {
+          ASSERT_LE(prev_file, name) << "Files are not in alphabetical order";
+        }
+        prev_file = name;
       }
-      prev_dir = name;
-    } else {
-      if (!prev_file.empty()) {
-        ASSERT_LE(prev_file, name) << "Files are not in alphabetical order";
-      }
-      prev_file = name;
     }
-  }
 }
 
 // Test: type=directory filter excludes files from the listing
 TEST_F(BrowseDirectoryTest, BrowseTypeDirFilterExcludesFiles) {
-  SimpleWeb::CaseInsensitiveMultimap headers;
-  headers.emplace("Authorization", create_auth_header("testuser", "testpass"));
+    SimpleWeb::CaseInsensitiveMultimap headers;
+    headers.emplace("Authorization", create_auth_header("testuser", "testpass"));
 
-  const auto response = client->request("GET", browse_url(browse_test_dir.string(), "directory"), "", headers);
-  ASSERT_EQ(response->status_code, "200 OK");
+    const auto response = client->request("GET", browse_url(browse_test_dir.string(), "directory"), "", headers);
+    ASSERT_EQ(response->status_code, "200 OK");
 
-  const nlohmann::json json = nlohmann::json::parse(response->content.string());
-  const auto &entries = json["entries"];
+    const nlohmann::json json = nlohmann::json::parse(response->content.string());
+    const auto &entries = json["entries"];
 
-  for (const auto &entry : entries) {
-    ASSERT_EQ(entry["type"].get<std::string>(), "directory")
-      << "Non-directory entry '" << entry["name"] << "' found with type=directory filter";
-  }
+    for (const auto &entry : entries) {
+      ASSERT_EQ(entry["type"].get<std::string>(), "directory")
+        << "Non-directory entry '" << entry["name"] << "' found with type=directory filter";
+    }
 
-  // Subdirectories must still be present
-  ASSERT_NE(find_entry(entries, "subdir_a"), entries.end());
-  ASSERT_NE(find_entry(entries, "subdir_b"), entries.end());
+    // Subdirectories must still be present
+    ASSERT_NE(find_entry(entries, "subdir_a"), entries.end());
+    ASSERT_NE(find_entry(entries, "subdir_b"), entries.end());
 }
 
 // Test: type=file returns both files and directories
 TEST_F(BrowseDirectoryTest, BrowseTypeFileReturnsBoth) {
-  SimpleWeb::CaseInsensitiveMultimap headers;
-  headers.emplace("Authorization", create_auth_header("testuser", "testpass"));
+    SimpleWeb::CaseInsensitiveMultimap headers;
+    headers.emplace("Authorization", create_auth_header("testuser", "testpass"));
 
-  const auto response = client->request("GET", browse_url(browse_test_dir.string(), "file"), "", headers);
-  ASSERT_EQ(response->status_code, "200 OK");
+    const auto response = client->request("GET", browse_url(browse_test_dir.string(), "file"), "", headers);
+    ASSERT_EQ(response->status_code, "200 OK");
 
-  const nlohmann::json json = nlohmann::json::parse(response->content.string());
-  const auto &entries = json["entries"];
+    const nlohmann::json json = nlohmann::json::parse(response->content.string());
+    const auto &entries = json["entries"];
 
-  const bool has_dir = std::ranges::any_of(entries, [](const nlohmann::json &e) {
-    return e["type"] == "directory";
-  });
-  const bool has_file = std::ranges::any_of(entries, [](const nlohmann::json &e) {
-    return e["type"] == "file";
-  });
-  ASSERT_TRUE(has_dir);
-  ASSERT_TRUE(has_file);
+    const bool has_dir = std::ranges::any_of(entries, [](const nlohmann::json &e) {
+      return e["type"] == "directory";
+    });
+    const bool has_file = std::ranges::any_of(entries, [](const nlohmann::json &e) {
+      return e["type"] == "file";
+    });
+    ASSERT_TRUE(has_dir);
+    ASSERT_TRUE(has_file);
 }
 
 // Test: type=executable still includes directories for navigation
 TEST_F(BrowseDirectoryTest, BrowseTypeExecutableIncludesDirs) {
-  SimpleWeb::CaseInsensitiveMultimap headers;
-  headers.emplace("Authorization", create_auth_header("testuser", "testpass"));
+    SimpleWeb::CaseInsensitiveMultimap headers;
+    headers.emplace("Authorization", create_auth_header("testuser", "testpass"));
 
-  const auto response = client->request("GET", browse_url(browse_test_dir.string(), "executable"), "", headers);
-  ASSERT_EQ(response->status_code, "200 OK");
+    const auto response = client->request("GET", browse_url(browse_test_dir.string(), "executable"), "", headers);
+    ASSERT_EQ(response->status_code, "200 OK");
 
-  const nlohmann::json json = nlohmann::json::parse(response->content.string());
-  const auto &entries = json["entries"];
+    const nlohmann::json json = nlohmann::json::parse(response->content.string());
+    const auto &entries = json["entries"];
 
-  const bool has_dir = std::ranges::any_of(entries, [](const nlohmann::json &e) {
-    return e["type"] == "directory";
-  });
-  ASSERT_TRUE(has_dir);
+    const bool has_dir = std::ranges::any_of(entries, [](const nlohmann::json &e) {
+      return e["type"] == "directory";
+    });
+    ASSERT_TRUE(has_dir);
 }
 
 // Test: type=executable excludes plain (non-executable) files
 TEST_F(BrowseDirectoryTest, BrowseTypeExecutableExcludesNonExecutableFiles) {
-  SimpleWeb::CaseInsensitiveMultimap headers;
-  headers.emplace("Authorization", create_auth_header("testuser", "testpass"));
+    SimpleWeb::CaseInsensitiveMultimap headers;
+    headers.emplace("Authorization", create_auth_header("testuser", "testpass"));
 
-  const auto response = client->request("GET", browse_url(browse_test_dir.string(), "executable"), "", headers);
-  ASSERT_EQ(response->status_code, "200 OK");
+    const auto response = client->request("GET", browse_url(browse_test_dir.string(), "executable"), "", headers);
+    ASSERT_EQ(response->status_code, "200 OK");
 
-  const nlohmann::json json = nlohmann::json::parse(response->content.string());
-  const auto &entries = json["entries"];
+    const nlohmann::json json = nlohmann::json::parse(response->content.string());
+    const auto &entries = json["entries"];
 
-  // file_alpha.txt and file_beta.txt have no execute permission / wrong extension
-  for (const auto &entry : entries) {
-    if (entry["type"] == "file") {
-      const std::string name = entry["name"].get<std::string>();
-      ASSERT_NE(name, "file_alpha.txt") << "Non-executable file included in type=executable listing";
-      ASSERT_NE(name, "file_beta.txt") << "Non-executable file included in type=executable listing";
+    // file_alpha.txt and file_beta.txt have no execute permission / wrong extension
+    for (const auto &entry : entries) {
+      if (entry["type"] == "file") {
+        const std::string name = entry["name"].get<std::string>();
+        ASSERT_NE(name, "file_alpha.txt") << "Non-executable file included in type=executable listing";
+        ASSERT_NE(name, "file_beta.txt") << "Non-executable file included in type=executable listing";
+      }
     }
-  }
 }
 
 // Test: type=executable includes the known executable file
 TEST_F(BrowseDirectoryTest, BrowseTypeExecutableIncludesExecutableFile) {
-  SimpleWeb::CaseInsensitiveMultimap headers;
-  headers.emplace("Authorization", create_auth_header("testuser", "testpass"));
+    SimpleWeb::CaseInsensitiveMultimap headers;
+    headers.emplace("Authorization", create_auth_header("testuser", "testpass"));
 
-  const auto response = client->request("GET", browse_url(browse_test_dir.string(), "executable"), "", headers);
-  ASSERT_EQ(response->status_code, "200 OK");
+    const auto response = client->request("GET", browse_url(browse_test_dir.string(), "executable"), "", headers);
+    ASSERT_EQ(response->status_code, "200 OK");
 
-  const nlohmann::json json = nlohmann::json::parse(response->content.string());
-  const auto &entries = json["entries"];
+    const nlohmann::json json = nlohmann::json::parse(response->content.string());
+    const auto &entries = json["entries"];
 
 #ifdef _WIN32
-  const std::string exec_name = "test_exec.exe";
+    const std::string exec_name = "test_exec.exe";
 #else
-  const std::string exec_name = "test_exec";
+    const std::string exec_name = "test_exec";
 #endif
 
-  ASSERT_NE(find_entry(entries, exec_name), entries.end())
-    << "Expected executable file '" << exec_name << "' not found with type=executable filter";
+    ASSERT_NE(find_entry(entries, exec_name), entries.end())
+      << "Expected executable file '" << exec_name << "' not found with type=executable filter";
 }
 
 // Test: supplying a file path navigates to its parent directory
 TEST_F(BrowseDirectoryTest, BrowseFilepathNavigatesToParentDirectory) {
-  SimpleWeb::CaseInsensitiveMultimap headers;
-  headers.emplace("Authorization", create_auth_header("testuser", "testpass"));
+    SimpleWeb::CaseInsensitiveMultimap headers;
+    headers.emplace("Authorization", create_auth_header("testuser", "testpass"));
 
-  const std::filesystem::path file_path = browse_test_dir / "file_alpha.txt";
-  const auto response = client->request("GET", browse_url(file_path.string()), "", headers);
-  ASSERT_EQ(response->status_code, "200 OK");
+    const std::filesystem::path file_path = browse_test_dir / "file_alpha.txt";
+    const auto response = client->request("GET", browse_url(file_path.string()), "", headers);
+    ASSERT_EQ(response->status_code, "200 OK");
 
-  const nlohmann::json json = nlohmann::json::parse(response->content.string());
-  const std::filesystem::path returned = std::filesystem::weakly_canonical(json["path"].get<std::string>());
-  const std::filesystem::path expected = std::filesystem::weakly_canonical(browse_test_dir);
-  ASSERT_EQ(returned, expected);
+    const nlohmann::json json = nlohmann::json::parse(response->content.string());
+    const std::filesystem::path returned = std::filesystem::weakly_canonical(json["path"].get<std::string>());
+    const std::filesystem::path expected = std::filesystem::weakly_canonical(browse_test_dir);
+    ASSERT_EQ(returned, expected);
 }
 
 // Test: a non-existent child path falls back to the existing parent directory
 TEST_F(BrowseDirectoryTest, BrowseNonexistentChildPathFallsBackToParent) {
-  SimpleWeb::CaseInsensitiveMultimap headers;
-  headers.emplace("Authorization", create_auth_header("testuser", "testpass"));
+    SimpleWeb::CaseInsensitiveMultimap headers;
+    headers.emplace("Authorization", create_auth_header("testuser", "testpass"));
 
-  const std::filesystem::path nonexistent = browse_test_dir / "does_not_exist_xyz";
-  const auto response = client->request("GET", browse_url(nonexistent.string()), "", headers);
-  ASSERT_EQ(response->status_code, "200 OK");
+    const std::filesystem::path nonexistent = browse_test_dir / "does_not_exist_xyz";
+    const auto response = client->request("GET", browse_url(nonexistent.string()), "", headers);
+    ASSERT_EQ(response->status_code, "200 OK");
 
-  const nlohmann::json json = nlohmann::json::parse(response->content.string());
-  const std::filesystem::path returned = std::filesystem::weakly_canonical(json["path"].get<std::string>());
-  const std::filesystem::path expected = std::filesystem::weakly_canonical(browse_test_dir);
-  ASSERT_EQ(returned, expected);
+    const nlohmann::json json = nlohmann::json::parse(response->content.string());
+    const std::filesystem::path returned = std::filesystem::weakly_canonical(json["path"].get<std::string>());
+    const std::filesystem::path expected = std::filesystem::weakly_canonical(browse_test_dir);
+    ASSERT_EQ(returned, expected);
 }
 
 // Test: a path where both the target and its parent don't exist returns 400
 TEST_F(BrowseDirectoryTest, BrowseTrulyNonexistentPathReturnsBadRequest) {
-  SimpleWeb::CaseInsensitiveMultimap headers;
-  headers.emplace("Authorization", create_auth_header("testuser", "testpass"));
+    SimpleWeb::CaseInsensitiveMultimap headers;
+    headers.emplace("Authorization", create_auth_header("testuser", "testpass"));
 
-  // Construct a deeply non-existent path (parent also doesn't exist)
-  const std::string nonexistent = "/sunshine_nonexistent_xyz_54321/also_nonexistent";
-  const auto response = client->request("GET", browse_url(nonexistent), "", headers);
-  ASSERT_EQ(response->status_code, "400 Bad Request");
+    // Construct a deeply non-existent path (parent also doesn't exist)
+    const std::string nonexistent = "/sunshine_nonexistent_xyz_54321/also_nonexistent";
+    const auto response = client->request("GET", browse_url(nonexistent), "", headers);
+    ASSERT_EQ(response->status_code, "400 Bad Request");
 }
 
 // Test: omitting the path parameter returns a valid response (defaults to a browsable location)
 TEST_F(BrowseDirectoryTest, BrowseEmptyPathReturnsValidResponse) {
-  SimpleWeb::CaseInsensitiveMultimap headers;
-  headers.emplace("Authorization", create_auth_header("testuser", "testpass"));
+    SimpleWeb::CaseInsensitiveMultimap headers;
+    headers.emplace("Authorization", create_auth_header("testuser", "testpass"));
 
-  const auto response = client->request("GET", "/browse-test", "", headers);
-  ASSERT_EQ(response->status_code, "200 OK");
+    const auto response = client->request("GET", "/browse-test", "", headers);
+    ASSERT_EQ(response->status_code, "200 OK");
 
-  const nlohmann::json json = nlohmann::json::parse(response->content.string());
-  ASSERT_TRUE(json.contains("path"));
-  ASSERT_TRUE(json.contains("parent"));
-  ASSERT_TRUE(json.contains("entries"));
-  ASSERT_TRUE(json["entries"].is_array());
+    const nlohmann::json json = nlohmann::json::parse(response->content.string());
+    ASSERT_TRUE(json.contains("path"));
+    ASSERT_TRUE(json.contains("parent"));
+    ASSERT_TRUE(json.contains("entries"));
+    ASSERT_TRUE(json["entries"].is_array());
 }
 
 #ifdef _WIN32
 // Test (Windows): empty/root path returns the list of logical drive letters
 TEST_F(BrowseDirectoryTest, BrowseWindowsEmptyPathReturnsDriveList) {
-  SimpleWeb::CaseInsensitiveMultimap headers;
-  headers.emplace("Authorization", create_auth_header("testuser", "testpass"));
+    SimpleWeb::CaseInsensitiveMultimap headers;
+    headers.emplace("Authorization", create_auth_header("testuser", "testpass"));
 
-  const auto response = client->request("GET", "/browse-test", "", headers);
-  ASSERT_EQ(response->status_code, "200 OK");
+    const auto response = client->request("GET", "/browse-test", "", headers);
+    ASSERT_EQ(response->status_code, "200 OK");
 
-  const nlohmann::json json = nlohmann::json::parse(response->content.string());
-  ASSERT_EQ(json["path"].get<std::string>(), "");
-  ASSERT_EQ(json["parent"].get<std::string>(), "");
-  ASSERT_GT(json["entries"].size(), 0u);
+    const nlohmann::json json = nlohmann::json::parse(response->content.string());
+    ASSERT_EQ(json["path"].get<std::string>(), "");
+    ASSERT_EQ(json["parent"].get<std::string>(), "");
+    ASSERT_GT(json["entries"].size(), 0u);
 
-  // Every entry must look like "X:\" – a drive letter root
-  for (const auto &entry : json["entries"]) {
-    ASSERT_EQ(entry["type"].get<std::string>(), "directory");
-    const std::string name = entry["name"].get<std::string>();
-    ASSERT_EQ(name.size(), 3u) << "Drive entry name should be 3 chars, e.g. 'C:\\'";
-    ASSERT_TRUE(std::isalpha(static_cast<unsigned char>(name[0])));
-    ASSERT_EQ(name[1], ':');
-    ASSERT_EQ(name[2], '\\');
-  }
+    // Every entry must look like "X:\" – a drive letter root
+    for (const auto &entry : json["entries"]) {
+      ASSERT_EQ(entry["type"].get<std::string>(), "directory");
+      const std::string name = entry["name"].get<std::string>();
+      ASSERT_EQ(name.size(), 3u) << "Drive entry name should be 3 chars, e.g. 'C:\\'";
+      ASSERT_TRUE(std::isalpha(static_cast<unsigned char>(name[0])));
+      ASSERT_EQ(name[1], ':');
+      ASSERT_EQ(name[2], '\\');
+    }
 }
 #else
 // Test (Unix): browsing "/" returns path == "/" and parent == "/" (at root, parent == self)
 TEST_F(BrowseDirectoryTest, BrowseUnixRootParentEqualsSelf) {
-  SimpleWeb::CaseInsensitiveMultimap headers;
-  headers.emplace("Authorization", create_auth_header("testuser", "testpass"));
+    SimpleWeb::CaseInsensitiveMultimap headers;
+    headers.emplace("Authorization", create_auth_header("testuser", "testpass"));
 
-  const auto response = client->request("GET", browse_url("/"), "", headers);
-  ASSERT_EQ(response->status_code, "200 OK");
+    const auto response = client->request("GET", browse_url("/"), "", headers);
+    ASSERT_EQ(response->status_code, "200 OK");
 
-  const nlohmann::json json = nlohmann::json::parse(response->content.string());
-  const std::string path = json["path"].get<std::string>();
-  const std::string parent = json["parent"].get<std::string>();
+    const nlohmann::json json = nlohmann::json::parse(response->content.string());
+    const std::string path = json["path"].get<std::string>();
+    const std::string parent = json["parent"].get<std::string>();
 
-  ASSERT_EQ(path, "/");
-  ASSERT_EQ(parent, "/");
+    ASSERT_EQ(path, "/");
+    ASSERT_EQ(parent, "/");
 }
 #endif
-
-// ============================================================
-// Direct unit tests for virtual input driver status helpers
-// ============================================================
-
-// Test: empty minimum driver versions accept any detected version
-TEST(ConfigHttpDriverStatusTest, IsDriverVersionSupported_EmptyMinimum_ReturnsTrue) {
-  ASSERT_TRUE(confighttp::is_driver_version_supported("", ""));
-  ASSERT_TRUE(confighttp::is_driver_version_supported("1.0.0.0", ""));
-}
-
-// Test: equal and newer numeric driver versions are supported
-TEST(ConfigHttpDriverStatusTest, IsDriverVersionSupported_EqualOrNewerVersion_ReturnsTrue) {
-  ASSERT_TRUE(confighttp::is_driver_version_supported("1.17.0.0", "1.17.0.0"));
-  ASSERT_TRUE(confighttp::is_driver_version_supported("1.18.0.0", "1.17.0.0"));
-  ASSERT_TRUE(confighttp::is_driver_version_supported("2.0", "1.17.0.0"));
-}
-
-// Test: older numeric driver versions are unsupported
-TEST(ConfigHttpDriverStatusTest, IsDriverVersionSupported_OlderVersion_ReturnsFalse) {
-  ASSERT_FALSE(confighttp::is_driver_version_supported("1.16.9.9", "1.17.0.0"));
-  ASSERT_FALSE(confighttp::is_driver_version_supported("1.16", "1.17.0.0"));
-}
-
-// Test: invalid driver versions are unsupported when a minimum is required
-TEST(ConfigHttpDriverStatusTest, IsDriverVersionSupported_InvalidVersion_ReturnsFalse) {
-  ASSERT_FALSE(confighttp::is_driver_version_supported("", "1.17.0.0"));
-  ASSERT_FALSE(confighttp::is_driver_version_supported("1.17.beta", "1.17.0.0"));
-  ASSERT_FALSE(confighttp::is_driver_version_supported("1.17.", "1.17.0.0"));
-}
-
-// Test: numeric 0.0.x development versions are identified consistently
-TEST(ConfigHttpDriverStatusTest, IsDriverVersionDevelopment_RecognizesZeroMajorAndMinor) {
-  ASSERT_TRUE(confighttp::is_driver_version_development("0.0.0"));
-  ASSERT_TRUE(confighttp::is_driver_version_development("0.0.0.42"));
-  ASSERT_TRUE(confighttp::is_driver_version_development("0.0.1.0"));
-  ASSERT_FALSE(confighttp::is_driver_version_development("0.0"));
-  ASSERT_FALSE(confighttp::is_driver_version_development("0.1.0"));
-  ASSERT_FALSE(confighttp::is_driver_version_development("development"));
-}
-
-// Test: numeric development versions always bypass the production minimum
-TEST(ConfigHttpDriverStatusTest, IsDriverVersionSupported_DevelopmentVersionBypassesMinimum) {
-  ASSERT_TRUE(confighttp::is_driver_version_supported("0.0.0", "2026.823.352.3"));  // NOSONAR(cpp:S1313): not IP addresses
-  ASSERT_TRUE(confighttp::is_driver_version_supported("0.0.0.42", "2026.823.352.3"));  // NOSONAR(cpp:S1313): not IP addresses
-  ASSERT_TRUE(confighttp::is_driver_version_supported("0.0.1.0", "2026.823.352.3"));  // NOSONAR(cpp:S1313): not IP addresses
-  ASSERT_FALSE(confighttp::is_driver_version_supported("0.0", "2026.823.352.3"));  // NOSONAR(cpp:S1313): not IP addresses
-}
-
-// Test: driver status JSON includes compatibility and supported version metadata
-TEST(ConfigHttpDriverStatusTest, BuildDriverStatus_IncludesExpectedFields) {
-  const auto status = confighttp::build_driver_status(true, "1.17.0.0", "1.17.0.0");  // NOSONAR(cpp:S1313): not an IP address
-
-  ASSERT_TRUE(status["installed"].get<bool>());
-  ASSERT_EQ(status["version"].get<std::string>(), "1.17.0.0");
-  ASSERT_EQ(status["minimum_version"].get<std::string>(), "1.17.0.0");
-  ASSERT_EQ(status["supported_versions"].get<std::string>(), ">= 1.17.0.0");
-  ASSERT_FALSE(status["development_version"].get<bool>());
-  ASSERT_TRUE(status["version_compatible"].get<bool>());
-}
-
-// Test: missing drivers are not compatible even when any version would be accepted
-TEST(ConfigHttpDriverStatusTest, BuildDriverStatus_NotInstalledIsNotCompatible) {
-  const auto status = confighttp::build_driver_status(false, "", "");
-
-  ASSERT_FALSE(status["installed"].get<bool>());
-  ASSERT_EQ(status["supported_versions"].get<std::string>(), "Any");
-  ASSERT_FALSE(status["development_version"].get<bool>());
-  ASSERT_FALSE(status["version_compatible"].get<bool>());
-}
-
-// Test: detected drivers remain installed when their version is too old
-TEST(ConfigHttpDriverStatusTest, BuildDriverStatus_OlderDetectedDriverIsInstalledButIncompatible) {
-  const auto status = confighttp::build_driver_status(true, "2026.820.1844.57", "2026.823.352.3");  // NOSONAR(cpp:S1313): not IP addresses
-
-  ASSERT_TRUE(status["installed"].get<bool>());
-  ASSERT_FALSE(status["development_version"].get<bool>());
-  ASSERT_FALSE(status["version_compatible"].get<bool>());
-}
-
-// Test: development status remains compatible while retaining the production floor metadata
-TEST(ConfigHttpDriverStatusTest, BuildDriverStatus_DevelopmentVersionIsCompatible) {
-  const auto status = confighttp::build_driver_status(true, "0.0.0.42", "2026.823.352.3");  // NOSONAR(cpp:S1313): not IP addresses
-
-  ASSERT_EQ(status["minimum_version"].get<std::string>(), "2026.823.352.3");  // NOSONAR(cpp:S1313): not an IP address
-  ASSERT_EQ(status["supported_versions"].get<std::string>(), ">= 2026.823.352.3");  // NOSONAR(cpp:S1313): not an IP address
-  ASSERT_TRUE(status["development_version"].get<bool>());
-  ASSERT_TRUE(status["version_compatible"].get<bool>());
-}
-
-TEST(ConfigHttpDriverStatusTest, BuildsLiveVirtualInputDriverStatus) {
-  const auto virtualhid = confighttp::get_virtualhid_driver_status();
-  EXPECT_TRUE(virtualhid.contains("installed"));
-  EXPECT_TRUE(virtualhid.contains("version"));
-  EXPECT_TRUE(virtualhid.contains("version_compatible"));
-  EXPECT_TRUE(virtualhid.contains("development_version"));
-  EXPECT_TRUE(virtualhid.contains("backend_name"));
-  EXPECT_TRUE(virtualhid.contains("requires_installed_driver"));
-#ifdef __APPLE__
-  EXPECT_EQ(virtualhid["minimum_version"].get<std::string>(), LIBVIRTUALHID_MACOS_MINIMUM_VERSION);
-  EXPECT_EQ(virtualhid["supported_versions"].get<std::string>(), std::format(">= {}", LIBVIRTUALHID_MACOS_MINIMUM_VERSION));
-  if (std::filesystem::exists("/Applications/VirtualHIDBroker.app/Contents/Info.plist")) {
-    EXPECT_TRUE(virtualhid["installed"].get<bool>());
-    EXPECT_FALSE(virtualhid["version"].get<std::string>().empty());
-  }
-#else
-  EXPECT_EQ(virtualhid["minimum_version"].get<std::string>(), LIBVIRTUALHID_MINIMUM_VERSION);
-  EXPECT_EQ(virtualhid["supported_versions"].get<std::string>(), std::format(">= {}", LIBVIRTUALHID_MINIMUM_VERSION));
-#endif
-
-  const auto vigembus = confighttp::get_vigembus_driver_status();
-  EXPECT_TRUE(vigembus.contains("installed"));
-  EXPECT_TRUE(vigembus.contains("version"));
-  EXPECT_TRUE(vigembus.contains("minimum_version"));
-  EXPECT_TRUE(vigembus.contains("version_compatible"));
-}
-
-TEST(ConfigHttpLicenseStatusTest, ClearsSensitiveRequestString) {
-  std::string sensitive_value = "license-key";
-  confighttp::clear_sensitive_string_for_testing(sensitive_value);
-  EXPECT_TRUE(sensitive_value.empty());
-}
-
-TEST_F(ConfigHttpTest, VirtualInputStatusReturnsBothBackends) {
-  SimpleWeb::CaseInsensitiveMultimap headers;
-  headers.emplace("Authorization", create_auth_header("testuser", "testpass"));
-
-  const auto response = client->request("GET", "/virtual-input-status-test", "", headers);
-  ASSERT_EQ(response->status_code, "200 OK");
-  const auto body = nlohmann::json::parse(response->content.string());
-  ASSERT_TRUE(body.contains("virtualhid"));
-  ASSERT_TRUE(body.contains("vigembus"));
-  EXPECT_TRUE(body.at("virtualhid").contains("installed"));
-  EXPECT_TRUE(body.at("vigembus").contains("installed"));
-}
 
 TEST_F(ConfigHttpTest, PermissionsEndpointRequiresAuthenticationAndCsrf) {
-  SimpleWeb::CaseInsensitiveMultimap headers;
-  headers.emplace("Content-Type", "application/json");
-  EXPECT_EQ(client->request("GET", "/permissions-test", "", headers)->status_code, "401 Unauthorized");
-  EXPECT_EQ(client->request("POST", "/permissions-test", R"({"id":"screen_recording"})", headers)->status_code, "401 Unauthorized");
+    SimpleWeb::CaseInsensitiveMultimap headers;
+    headers.emplace("Content-Type", "application/json");
+    EXPECT_EQ(client->request("GET", "/permissions-test", "", headers)->status_code, "401 Unauthorized");
+    EXPECT_EQ(client->request("POST", "/permissions-test", R"({"id":"screen_recording"})", headers)->status_code, "401 Unauthorized");
 
-  headers.emplace("Authorization", create_auth_header("testuser", "testpass"));
-  headers.emplace("Origin", "https://example.invalid");
-  const auto response = client->request("POST", "/permissions-test", R"({"id":"screen_recording"})", headers);
-  EXPECT_EQ(response->status_code, "400 Bad Request");
-  EXPECT_TRUE(response->content.string().contains("Missing CSRF token"));
+    headers.emplace("Authorization", create_auth_header("testuser", "testpass"));
+    headers.emplace("Origin", "https://example.invalid");
+    const auto response = client->request("POST", "/permissions-test", R"({"id":"screen_recording"})", headers);
+    EXPECT_EQ(response->status_code, "400 Bad Request");
+    EXPECT_TRUE(response->content.string().contains("Missing CSRF token"));
 }
 
 TEST_F(ConfigHttpTest, PermissionsEndpointReturnsRequiredAndOptionalStatuses) {
-  SimpleWeb::CaseInsensitiveMultimap headers;
-  headers.emplace("Authorization", create_auth_header("testuser", "testpass"));
+    SimpleWeb::CaseInsensitiveMultimap headers;
+    headers.emplace("Authorization", create_auth_header("testuser", "testpass"));
 
-  const auto response = client->request("GET", "/permissions-test", "", headers);
-  ASSERT_EQ(response->status_code, "200 OK");
-  const auto body = nlohmann::json::parse(response->content.string());
-  ASSERT_EQ(body.at("permissions").size(), 2U);
-  EXPECT_EQ(body.at("permissions").at(0).at("id"), "screen_recording");
-  EXPECT_TRUE(body.at("permissions").at(0).at("required").get<bool>());
-  EXPECT_FALSE(body.at("permissions").at(1).at("required").get<bool>());
+    const auto response = client->request("GET", "/permissions-test", "", headers);
+    ASSERT_EQ(response->status_code, "200 OK");
+    const auto body = nlohmann::json::parse(response->content.string());
+    ASSERT_EQ(body.at("permissions").size(), 2U);
+    EXPECT_EQ(body.at("permissions").at(0).at("id"), "screen_recording");
+    EXPECT_TRUE(body.at("permissions").at(0).at("required").get<bool>());
+    EXPECT_FALSE(body.at("permissions").at(1).at("required").get<bool>());
 }
 
 TEST_F(ConfigHttpTest, PermissionsEndpointRejectsMalformedAndUnknownRequests) {
-  SimpleWeb::CaseInsensitiveMultimap headers;
-  headers.emplace("Content-Type", "application/json");
-  headers.emplace("Authorization", create_auth_header("testuser", "testpass"));
-  headers.emplace("Origin", std::format("https://localhost:{}", port));
+    SimpleWeb::CaseInsensitiveMultimap headers;
+    headers.emplace("Content-Type", "application/json");
+    headers.emplace("Authorization", create_auth_header("testuser", "testpass"));
+    headers.emplace("Origin", std::format("https://localhost:{}", port));
 
-  EXPECT_EQ(client->request("POST", "/permissions-test", "not-json", headers)->status_code, "400 Bad Request");
-  EXPECT_EQ(client->request("POST", "/permissions-test", R"({"id":1})", headers)->status_code, "400 Bad Request");
-  EXPECT_EQ(client->request("POST", "/permissions-test", R"({"id":"unknown"})", headers)->status_code, "400 Bad Request");
+    EXPECT_EQ(client->request("POST", "/permissions-test", "not-json", headers)->status_code, "400 Bad Request");
+    EXPECT_EQ(client->request("POST", "/permissions-test", R"({"id":1})", headers)->status_code, "400 Bad Request");
+    EXPECT_EQ(client->request("POST", "/permissions-test", R"({"id":"unknown"})", headers)->status_code, "400 Bad Request");
 }
-
-TEST_F(ConfigHttpTest, VirtualInputLicenseReturnsCurrentStatus) {
-  SimpleWeb::CaseInsensitiveMultimap headers;
-  headers.emplace("Authorization", create_auth_header("testuser", "testpass"));
-
-  const auto response = client->request("GET", "/virtual-input-license-test", "", headers);
-  ASSERT_EQ(response->status_code, "200 OK");
-  const auto body = nlohmann::json::parse(response->content.string());
-  EXPECT_TRUE(body.at("operation_ok").get<bool>());
-  EXPECT_TRUE(body.at("service_available").get<bool>());
-  EXPECT_EQ(body.at("state").get<std::string>(), "licensed");
-  EXPECT_TRUE(body.at("licensed").get<bool>());
-  EXPECT_EQ(body.at("active_devices").get<unsigned int>(), 2U);
-  EXPECT_EQ(body.at("message").get<std::string>(), "Test license status");
-}
-
-// Test: every public license state maps to a stable Web UI state string
-TEST(ConfigHttpLicenseStatusTest, BuildVirtualHidLicenseStatus_MapsEveryState) {
-  using enum lvh::LicenseState;
-
-  const std::array states {
-    std::pair {unavailable, "unavailable"s},
-    std::pair {unlicensed, "unlicensed"s},
-    std::pair {licensed, "licensed"s},
-    std::pair {expired, "expired"s},
-    std::pair {disabled, "disabled"s},
-    std::pair {invalid, "invalid"s},
-  };
-
-  for (const auto &[state, expected] : states) {
-    lvh::LicenseStatus license;
-    license.state = state;
-    const auto output = confighttp::build_virtualhid_license_status({lvh::OperationStatus::success(), license});
-    EXPECT_EQ(output["state"].get<std::string>(), expected);
-    EXPECT_EQ(output["licensed"].get<bool>(), state == licensed);
-  }
-}
-
-// Test: license status JSON includes all customer-visible metadata without a key field
-TEST(ConfigHttpLicenseStatusTest, BuildVirtualHidLicenseStatus_IncludesExpectedFields) {
-  lvh::LicenseStatus license;
-  license.service_available = true;
-  license.state = lvh::LicenseState::licensed;
-  license.active_devices = 2;
-  license.activation_limit = 5;
-  license.activation_usage = 1;
-  license.plan_name = "Yearly";
-  license.customer_email = "customer@example.com";
-  license.message = "License is active";
-  license.purchase_url = "https://example.com/buy";
-  license.manage_account_url = "https://example.com/manage";
-
-  const auto output = confighttp::build_virtualhid_license_status({lvh::OperationStatus::success(), license});
-  EXPECT_TRUE(output["operation_ok"].get<bool>());
-  EXPECT_TRUE(output["service_available"].get<bool>());
-  EXPECT_EQ(output["active_devices"].get<unsigned int>(), 2U);
-  EXPECT_EQ(output["activation_limit"].get<unsigned int>(), 5U);
-  EXPECT_EQ(output["activation_usage"].get<unsigned int>(), 1U);
-  EXPECT_EQ(output["plan_name"].get<std::string>(), "Yearly");
-  EXPECT_EQ(output["customer_email"].get<std::string>(), "customer@example.com");
-  EXPECT_FALSE(output.contains("expires_at"));
-  EXPECT_EQ(output["message"].get<std::string>(), "License is active");
-  EXPECT_EQ(output["purchase_url"].get<std::string>(), "https://example.com/buy");
-  EXPECT_EQ(output["manage_account_url"].get<std::string>(), "https://example.com/manage");
-  EXPECT_EQ(output["error"].get<std::string>(), "");
-  EXPECT_FALSE(output.contains("license_key"));
-}
-
-// Test: failed license operations preserve the latest status and expose only the safe error message
-TEST(ConfigHttpLicenseStatusTest, BuildVirtualHidLicenseStatus_IncludesOperationFailure) {
-  lvh::LicenseStatus license;
-  license.service_available = true;
-  license.state = lvh::LicenseState::invalid;
-  const auto operation = lvh::OperationStatus::failure(lvh::ErrorCode::license_invalid, "License is invalid");
-
-  const auto output = confighttp::build_virtualhid_license_status({operation, license});
-  EXPECT_FALSE(output["operation_ok"].get<bool>());
-  EXPECT_EQ(output["state"].get<std::string>(), "invalid");
-  EXPECT_EQ(output["error"].get<std::string>(), "License is invalid");
-}
-
 // ============================================================
 // Direct unit tests for browseDirectory helper functions
 // ============================================================
@@ -1856,210 +1574,210 @@ TEST(ConfigHttpLicenseStatusTest, BuildVirtualHidLicenseStatus_IncludesOperation
 // Test: is_browsable_executable correctly identifies executable files
 #ifdef _WIN32
 TEST_F(BrowseDirectoryTest, IsBrowsableExecutable_WindowsExeExtension_ReturnsTrue) {
-  const std::filesystem::path exec_file = browse_test_dir / "test_exec.exe";
-  const std::filesystem::directory_entry entry(exec_file);
-  ASSERT_TRUE(confighttp::is_browsable_executable(entry, std::filesystem::status(exec_file)));
+    const std::filesystem::path exec_file = browse_test_dir / "test_exec.exe";
+    const std::filesystem::directory_entry entry(exec_file);
+    ASSERT_TRUE(confighttp::is_browsable_executable(entry, std::filesystem::status(exec_file)));
 }
 
 TEST_F(BrowseDirectoryTest, IsBrowsableExecutable_WindowsBatExtension_ReturnsTrue) {
-  const std::filesystem::path bat_file = browse_test_dir / "test_script.bat";
-  std::ofstream(bat_file) << "@echo off";
-  const std::filesystem::directory_entry entry(bat_file);
-  ASSERT_TRUE(confighttp::is_browsable_executable(entry, std::filesystem::status(bat_file)));
-  std::filesystem::remove(bat_file);
+    const std::filesystem::path bat_file = browse_test_dir / "test_script.bat";
+    std::ofstream(bat_file) << "@echo off";
+    const std::filesystem::directory_entry entry(bat_file);
+    ASSERT_TRUE(confighttp::is_browsable_executable(entry, std::filesystem::status(bat_file)));
+    std::filesystem::remove(bat_file);
 }
 
 TEST_F(BrowseDirectoryTest, IsBrowsableExecutable_WindowsTxtExtension_ReturnsFalse) {
-  const std::filesystem::path txt_file = browse_test_dir / "file_alpha.txt";
-  const std::filesystem::directory_entry entry(txt_file);
-  ASSERT_FALSE(confighttp::is_browsable_executable(entry, std::filesystem::status(txt_file)));
+    const std::filesystem::path txt_file = browse_test_dir / "file_alpha.txt";
+    const std::filesystem::directory_entry entry(txt_file);
+    ASSERT_FALSE(confighttp::is_browsable_executable(entry, std::filesystem::status(txt_file)));
 }
 
 TEST_F(BrowseDirectoryTest, IsBrowsableExecutable_WindowsCaseInsensitive_ReturnsTrue) {
-  // .EXE uppercase should still be recognized
-  const std::filesystem::path upper_exe = browse_test_dir / "UPPER.EXE";
-  std::ofstream(upper_exe) << "fake";
-  const std::filesystem::directory_entry entry(upper_exe);
-  ASSERT_TRUE(confighttp::is_browsable_executable(entry, std::filesystem::status(upper_exe)));
-  std::filesystem::remove(upper_exe);
+    // .EXE uppercase should still be recognized
+    const std::filesystem::path upper_exe = browse_test_dir / "UPPER.EXE";
+    std::ofstream(upper_exe) << "fake";
+    const std::filesystem::directory_entry entry(upper_exe);
+    ASSERT_TRUE(confighttp::is_browsable_executable(entry, std::filesystem::status(upper_exe)));
+    std::filesystem::remove(upper_exe);
 }
 #else
 TEST_F(BrowseDirectoryTest, IsBrowsableExecutable_LinuxExecBitSet_ReturnsTrue) {
-  const std::filesystem::path exec_file = browse_test_dir / "test_exec";
-  const std::filesystem::directory_entry entry(exec_file);
-  ASSERT_TRUE(confighttp::is_browsable_executable(entry, std::filesystem::status(exec_file)));
+    const std::filesystem::path exec_file = browse_test_dir / "test_exec";
+    const std::filesystem::directory_entry entry(exec_file);
+    ASSERT_TRUE(confighttp::is_browsable_executable(entry, std::filesystem::status(exec_file)));
 }
 
 TEST_F(BrowseDirectoryTest, IsBrowsableExecutable_LinuxNoExecBit_ReturnsFalse) {
-  const std::filesystem::path txt_file = browse_test_dir / "file_alpha.txt";
-  const std::filesystem::directory_entry entry(txt_file);
-  ASSERT_FALSE(confighttp::is_browsable_executable(entry, std::filesystem::status(txt_file)));
+    const std::filesystem::path txt_file = browse_test_dir / "file_alpha.txt";
+    const std::filesystem::directory_entry entry(txt_file);
+    ASSERT_FALSE(confighttp::is_browsable_executable(entry, std::filesystem::status(txt_file)));
 }
 
 TEST_F(BrowseDirectoryTest, IsBrowsableExecutable_LinuxGroupExecBit_ReturnsTrue) {
-  const std::filesystem::path group_exec = browse_test_dir / "group_exec_file";
-  std::ofstream(group_exec) << "#!/bin/sh";
-  std::filesystem::permissions(
-    group_exec,
-    std::filesystem::perms::owner_read | std::filesystem::perms::owner_write | std::filesystem::perms::group_exec,
-    std::filesystem::perm_options::replace
-  );
-  const std::filesystem::directory_entry entry(group_exec);
-  ASSERT_TRUE(confighttp::is_browsable_executable(entry, std::filesystem::status(group_exec)));
-  std::filesystem::remove(group_exec);
+    const std::filesystem::path group_exec = browse_test_dir / "group_exec_file";
+    std::ofstream(group_exec) << "#!/bin/sh";
+    std::filesystem::permissions(
+      group_exec,
+      std::filesystem::perms::owner_read | std::filesystem::perms::owner_write | std::filesystem::perms::group_exec,
+      std::filesystem::perm_options::replace
+    );
+    const std::filesystem::directory_entry entry(group_exec);
+    ASSERT_TRUE(confighttp::is_browsable_executable(entry, std::filesystem::status(group_exec)));
+    std::filesystem::remove(group_exec);
 }
 #endif
 
 // Test: build_browse_entries returns all entries for "any" type
 TEST_F(BrowseDirectoryTest, BuildBrowseEntries_TypeAny_ReturnsAllEntries) {
-  const auto entries = confighttp::build_browse_entries(browse_test_dir, "any");
-  ASSERT_TRUE(entries.is_array());
-  ASSERT_EQ(entries.size(), 5u);
+    const auto entries = confighttp::build_browse_entries(browse_test_dir, "any");
+    ASSERT_TRUE(entries.is_array());
+    ASSERT_EQ(entries.size(), 5u);
 }
 
 // Test: build_browse_entries returns only directories for "directory" type
 TEST_F(BrowseDirectoryTest, BuildBrowseEntries_TypeDirectory_OnlyReturnsDirs) {
-  const auto entries = confighttp::build_browse_entries(browse_test_dir, "directory");
-  ASSERT_TRUE(entries.is_array());
-  ASSERT_EQ(entries.size(), 2u);  // subdir_a, subdir_b
-  for (const auto &e : entries) {
-    ASSERT_EQ(e["type"].get<std::string>(), "directory");
-  }
+    const auto entries = confighttp::build_browse_entries(browse_test_dir, "directory");
+    ASSERT_TRUE(entries.is_array());
+    ASSERT_EQ(entries.size(), 2u);  // subdir_a, subdir_b
+    for (const auto &e : entries) {
+      ASSERT_EQ(e["type"].get<std::string>(), "directory");
+    }
 }
 
 // Test: build_browse_entries returns dirs and files for "file" type
 TEST_F(BrowseDirectoryTest, BuildBrowseEntries_TypeFile_ReturnsDirsAndFiles) {
-  const auto entries = confighttp::build_browse_entries(browse_test_dir, "file");
-  ASSERT_TRUE(entries.is_array());
-  const bool has_dir = std::ranges::any_of(entries, [](const nlohmann::json &e) {
-    return e["type"] == "directory";
-  });
-  const bool has_file = std::ranges::any_of(entries, [](const nlohmann::json &e) {
-    return e["type"] == "file";
-  });
-  ASSERT_TRUE(has_dir);
-  ASSERT_TRUE(has_file);
+    const auto entries = confighttp::build_browse_entries(browse_test_dir, "file");
+    ASSERT_TRUE(entries.is_array());
+    const bool has_dir = std::ranges::any_of(entries, [](const nlohmann::json &e) {
+      return e["type"] == "directory";
+    });
+    const bool has_file = std::ranges::any_of(entries, [](const nlohmann::json &e) {
+      return e["type"] == "file";
+    });
+    ASSERT_TRUE(has_dir);
+    ASSERT_TRUE(has_file);
 }
 
 // Test: build_browse_entries for "executable" includes dirs and only executable files
 TEST_F(BrowseDirectoryTest, BuildBrowseEntries_TypeExecutable_IncludesDirsAndExecFiles) {
-  const auto entries = confighttp::build_browse_entries(browse_test_dir, "executable");
-  ASSERT_TRUE(entries.is_array());
+    const auto entries = confighttp::build_browse_entries(browse_test_dir, "executable");
+    ASSERT_TRUE(entries.is_array());
 
-  // All directories must still be present for navigation
-  ASSERT_NE(find_entry(entries, "subdir_a"), entries.end());
-  ASSERT_NE(find_entry(entries, "subdir_b"), entries.end());
+    // All directories must still be present for navigation
+    ASSERT_NE(find_entry(entries, "subdir_a"), entries.end());
+    ASSERT_NE(find_entry(entries, "subdir_b"), entries.end());
 
 #ifdef _WIN32
-  const std::string exec_name = "test_exec.exe";
+    const std::string exec_name = "test_exec.exe";
 #else
-  const std::string exec_name = "test_exec";
+    const std::string exec_name = "test_exec";
 #endif
-  ASSERT_NE(find_entry(entries, exec_name), entries.end())
-    << "Expected executable '" << exec_name << "' not found";
+    ASSERT_NE(find_entry(entries, exec_name), entries.end())
+      << "Expected executable '" << exec_name << "' not found";
 
-  // Non-executable text files must NOT appear
-  ASSERT_EQ(find_entry(entries, "file_alpha.txt"), entries.end());
-  ASSERT_EQ(find_entry(entries, "file_beta.txt"), entries.end());
+    // Non-executable text files must NOT appear
+    ASSERT_EQ(find_entry(entries, "file_alpha.txt"), entries.end());
+    ASSERT_EQ(find_entry(entries, "file_beta.txt"), entries.end());
 }
 
 // Test: build_browse_entries sorts directories before files
 TEST_F(BrowseDirectoryTest, BuildBrowseEntries_SortsDirsBeforeFiles) {
-  const auto entries = confighttp::build_browse_entries(browse_test_dir, "any");
-  ASSERT_GE(entries.size(), 3u);
+    const auto entries = confighttp::build_browse_entries(browse_test_dir, "any");
+    ASSERT_GE(entries.size(), 3u);
 
-  bool seen_file = false;
-  for (const auto &e : entries) {
-    if (e["type"] == "file") {
-      seen_file = true;
-    } else {
-      // directory after a file means incorrect sort order
-      ASSERT_FALSE(seen_file)
-        << "Directory '" << e["name"].get<std::string>() << "' appeared after a file entry";
+    bool seen_file = false;
+    for (const auto &e : entries) {
+      if (e["type"] == "file") {
+        seen_file = true;
+      } else {
+        // directory after a file means incorrect sort order
+        ASSERT_FALSE(seen_file)
+          << "Directory '" << e["name"].get<std::string>() << "' appeared after a file entry";
+      }
     }
-  }
 }
 
 // Test: build_browse_entries sorts entries alphabetically within each group
 TEST_F(BrowseDirectoryTest, BuildBrowseEntries_SortsAlphabeticallyWithinGroups) {
-  const auto entries = confighttp::build_browse_entries(browse_test_dir, "any");
+    const auto entries = confighttp::build_browse_entries(browse_test_dir, "any");
 
-  // Collect names of dirs and files separately and check they are in order
-  std::vector<std::string> dir_names;
-  std::vector<std::string> file_names;
-  for (const auto &e : entries) {
-    auto name = e["name"].get<std::string>();
-    std::ranges::transform(name, name.begin(), [](unsigned char c) {
-      return std::tolower(c);
-    });
-    if (e["type"] == "directory") {
-      dir_names.push_back(name);
-    } else {
-      file_names.push_back(name);
+    // Collect names of dirs and files separately and check they are in order
+    std::vector<std::string> dir_names;
+    std::vector<std::string> file_names;
+    for (const auto &e : entries) {
+      auto name = e["name"].get<std::string>();
+      std::ranges::transform(name, name.begin(), [](unsigned char c) {
+        return std::tolower(c);
+      });
+      if (e["type"] == "directory") {
+        dir_names.push_back(name);
+      } else {
+        file_names.push_back(name);
+      }
     }
-  }
 
-  ASSERT_TRUE(std::ranges::is_sorted(dir_names))
-    << "Directory names are not in alphabetical order";
-  ASSERT_TRUE(std::ranges::is_sorted(file_names))
-    << "File names are not in alphabetical order";
+    ASSERT_TRUE(std::ranges::is_sorted(dir_names))
+      << "Directory names are not in alphabetical order";
+    ASSERT_TRUE(std::ranges::is_sorted(file_names))
+      << "File names are not in alphabetical order";
 }
 
 // Test: every entry returned by build_browse_entries has the required fields
 TEST_F(BrowseDirectoryTest, BuildBrowseEntries_EachEntryHasRequiredFields) {
-  const auto entries = confighttp::build_browse_entries(browse_test_dir, "any");
-  ASSERT_FALSE(entries.empty());
-  for (const auto &e : entries) {
-    ASSERT_TRUE(e.contains("name")) << "Entry missing 'name' field";
-    ASSERT_TRUE(e.contains("type")) << "Entry missing 'type' field";
-    ASSERT_TRUE(e.contains("path")) << "Entry missing 'path' field";
-    const std::string type = e["type"].get<std::string>();
-    ASSERT_TRUE(type == "directory" || type == "file")
-      << "Unexpected entry type: " << type;
-  }
+    const auto entries = confighttp::build_browse_entries(browse_test_dir, "any");
+    ASSERT_FALSE(entries.empty());
+    for (const auto &e : entries) {
+      ASSERT_TRUE(e.contains("name")) << "Entry missing 'name' field";
+      ASSERT_TRUE(e.contains("type")) << "Entry missing 'type' field";
+      ASSERT_TRUE(e.contains("path")) << "Entry missing 'path' field";
+      const std::string type = e["type"].get<std::string>();
+      ASSERT_TRUE(type == "directory" || type == "file")
+        << "Unexpected entry type: " << type;
+    }
 }
 
 // Test: build_browse_entries on an empty directory returns an empty array
 TEST_F(BrowseDirectoryTest, BuildBrowseEntries_EmptyDirectory_ReturnsEmptyArray) {
-  const std::filesystem::path empty_dir = browse_test_dir / "empty_subdir_for_test";
-  std::filesystem::create_directory(empty_dir);
+    const std::filesystem::path empty_dir = browse_test_dir / "empty_subdir_for_test";
+    std::filesystem::create_directory(empty_dir);
 
-  const auto entries = confighttp::build_browse_entries(empty_dir, "any");
+    const auto entries = confighttp::build_browse_entries(empty_dir, "any");
 
-  std::filesystem::remove(empty_dir);
+    std::filesystem::remove(empty_dir);
 
-  ASSERT_TRUE(entries.is_array());
-  ASSERT_TRUE(entries.empty());
+    ASSERT_TRUE(entries.is_array());
+    ASSERT_TRUE(entries.empty());
 }
 
 // Test: build_browse_entries on a non-existent path returns an empty array (does not throw)
 TEST_F(BrowseDirectoryTest, BuildBrowseEntries_NonexistentDirectory_ReturnsEmptyArray) {
-  const auto entries = confighttp::build_browse_entries("/sunshine_nonexistent_dir_xyz_99999", "any");
-  ASSERT_TRUE(entries.is_array());
-  ASSERT_TRUE(entries.empty());
+    const auto entries = confighttp::build_browse_entries("/sunshine_nonexistent_dir_xyz_99999", "any");
+    ASSERT_TRUE(entries.is_array());
+    ASSERT_TRUE(entries.empty());
 }
 
 #ifdef _WIN32
 // Test: get_windows_drives returns at least one drive
 TEST_F(BrowseDirectoryTest, GetWindowsDrives_ReturnsAtLeastOneDrive) {
-  const auto drives = confighttp::get_windows_drives();
-  ASSERT_TRUE(drives.is_array());
-  ASSERT_GT(drives.size(), 0u);
+    const auto drives = confighttp::get_windows_drives();
+    ASSERT_TRUE(drives.is_array());
+    ASSERT_GT(drives.size(), 0u);
 }
 
 // Test: get_windows_drives entries have correct name/type/path fields
 TEST_F(BrowseDirectoryTest, GetWindowsDrives_EntriesHaveCorrectFormat) {
-  for (const auto drives = confighttp::get_windows_drives(); const auto &drive : drives) {
-    ASSERT_TRUE(drive.contains("name"));
-    ASSERT_TRUE(drive.contains("type"));
-    ASSERT_TRUE(drive.contains("path"));
-    ASSERT_EQ(drive["type"].get<std::string>(), "directory");
-    const std::string name = drive["name"].get<std::string>();
-    ASSERT_EQ(name.size(), 3u) << "Drive name should be 3 chars, e.g. 'C:\\'";
-    ASSERT_TRUE(std::isalpha(static_cast<unsigned char>(name[0])));
-    ASSERT_EQ(name[1], ':');
-    ASSERT_EQ(name[2], '\\');
-    ASSERT_EQ(drive["path"].get<std::string>(), name);
-  }
+    for (const auto drives = confighttp::get_windows_drives(); const auto &drive : drives) {
+      ASSERT_TRUE(drive.contains("name"));
+      ASSERT_TRUE(drive.contains("type"));
+      ASSERT_TRUE(drive.contains("path"));
+      ASSERT_EQ(drive["type"].get<std::string>(), "directory");
+      const std::string name = drive["name"].get<std::string>();
+      ASSERT_EQ(name.size(), 3u) << "Drive name should be 3 chars, e.g. 'C:\\'";
+      ASSERT_TRUE(std::isalpha(static_cast<unsigned char>(name[0])));
+      ASSERT_EQ(name[1], ':');
+      ASSERT_EQ(name[2], '\\');
+      ASSERT_EQ(drive["path"].get<std::string>(), name);
+    }
 }
 #endif

@@ -6,9 +6,7 @@
       "locale": "en",
       "sunshine_name": "",
       "min_log_level": 2,
-      "global_prep_cmd": [],
-      "notify_pre_releases": "disabled",
-      "system_tray": "enabled"
+      "global_prep_cmd": []
     }
   },
   {
@@ -16,12 +14,11 @@
     "nameKey": "config.category_input",
     "options": {
       "controller": "enabled",
-      "gamepad_driver": "",
+      "gamepad_driver": "hidmaestro",
       "gamepad": "auto",
       "ds4_back_as_touchpad_click": "enabled",
       "motion_as_ds4": "enabled",
       "touchpad_as_ds4": "enabled",
-      "virtualhid_randomize_mac": "enabled",
       "back_button_timeout": -1,
       "keyboard": "enabled",
       "key_repeat_delay": 500,
@@ -38,14 +35,7 @@
     "id": "av",
     "nameKey": "config.category_audio_video",
     "options": {
-      "audio_sink": "",
-      "virtual_sink": "",
       "stream_audio": "enabled",
-      "install_steam_audio_drivers": "enabled",
-      "external_audio": "disabled",
-      "adapter_name": "",
-      "output_name": "",
-      "dd_configuration_option": "disabled",
       "dd_resolution_option": "auto",
       "dd_manual_resolution": "",
       "dd_refresh_rate_option": "auto",
@@ -53,7 +43,6 @@
       "dd_hdr_option": "auto",
       "dd_wa_hdr_toggle_delay": 0,
       "dd_config_revert_delay": 3000,
-      "dd_config_revert_on_disconnect": "disabled",
       "dd_mode_remapping": {
         "mixed": [],
         "resolution_only": [],

@@ -149,13 +149,10 @@ jobs:
             _support_headless_testing="${_support_headless_testing}" \
             makepkg -si --noconfirm
 
-          # Native packages must install the host rule used by dynamically
-          # created libvirtualhid hidraw and input event nodes.
+          # Native packages must install the rule that grants access to /dev/uinput,
+          # which is where Sunshine creates its virtual devices.
           test -f /usr/lib/udev/rules.d/60-sunshine.rules
-          grep -Fq 'IMPORT{parent}="HID_*"' \
-            /usr/lib/udev/rules.d/60-sunshine.rules
-          grep -Fq 'ENV{HID_PHYS}=="libvirtualhid/uhid/*"' \
-            /usr/lib/udev/rules.d/60-sunshine.rules
+          grep -Fq 'KERNEL=="uinput"' /usr/lib/udev/rules.d/60-sunshine.rules
           udevadm verify /usr/lib/udev/rules.d/60-sunshine.rules
 
           # Remove debug package

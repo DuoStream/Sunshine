@@ -27,9 +27,6 @@
 
 // lib includes
 #include <rs.h>
-#ifdef _WIN32
-  #include <libvirtualhid/license.hpp>
-#endif
 
 // local includes
 #include "confighttp.h"
@@ -284,10 +281,6 @@ int main(int argc, char *argv[]) {
     return fn->second(argv[0], config::sunshine.cmd.argc, config::sunshine.cmd.argv);
   }
 
-#ifdef _WIN32
-  config::select_all_gamepad_drivers_if_licensed(lvh::get_license_status().license.licensed());
-#endif
-
   // Adding guard here first as it also performs recovery after crash,
   // otherwise people could theoretically end up without display output.
   // It also should be destroyed before forced shutdown to expedite the cleanup.
@@ -501,10 +494,6 @@ int main(int argc, char *argv[]) {
 
   if (tray_is_enabled && config::sunshine.system_tray) {
     BOOST_LOG(info) << "Starting system tray"sv;
-#if defined(_WIN32) || defined(__APPLE__)
-    system_tray::prepare_tray_virtualhid_license();
-    system_tray::prepare_tray_virtualhid_driver();
-#endif
 #ifdef _WIN32
     // TODO: Windows has a weird bug where when running as a service and on the first Windows boot,
     // the tray icon would not appear even though Sunshine is running correctly otherwise.

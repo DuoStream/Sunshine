@@ -176,7 +176,7 @@ namespace platf {
     }
 
     /**
-     * @brief Request Post Event access for libvirtualhid keyboard and mouse input.
+     * @brief Request Post Event access for keyboard and mouse input.
      *
      * @param startup Whether this is an automatic startup request.
      * @return True when access exists or the request was opened.

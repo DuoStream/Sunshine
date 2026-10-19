@@ -162,13 +162,13 @@ namespace {
 TEST_F(ConfigPersistenceTest, AppendsMissingOptionWithoutReplacingExistingText) {
   ASSERT_EQ(file_handler::write_file(config_file().string().c_str(), "# retained comment"), 0);
 
-  EXPECT_TRUE(config::persist_config_option_if_missing("gamepad_driver", "all"));
+  EXPECT_TRUE(config::persist_config_option_if_missing("gamepad_driver", "hidmaestro"));
   EXPECT_EQ(
     file_handler::read_file(config_file().string().c_str()),
     "# retained comment\ngamepad_driver = all\n"
   );
 
-  EXPECT_FALSE(config::persist_config_option_if_missing("gamepad_driver", "virtualhid"));
+  EXPECT_FALSE(config::persist_config_option_if_missing("gamepad_driver", "none"));
   EXPECT_EQ(
     file_handler::read_file(config_file().string().c_str()),
     "# retained comment\ngamepad_driver = all\n"
@@ -176,23 +176,10 @@ TEST_F(ConfigPersistenceTest, AppendsMissingOptionWithoutReplacingExistingText) 
 }
 
 TEST_F(ConfigPersistenceTest, DoesNotReplaceAnExistingOption) {
-  ASSERT_EQ(file_handler::write_file(config_file().string().c_str(), "gamepad_driver = vigembus\n"), 0);
+  ASSERT_EQ(file_handler::write_file(config_file().string().c_str(), "gamepad_driver = none\n"), 0);
 
-  EXPECT_FALSE(config::persist_config_option_if_missing("gamepad_driver", "all"));
-  EXPECT_EQ(file_handler::read_file(config_file().string().c_str()), "gamepad_driver = vigembus\n");
-}
-
-TEST_F(ConfigPersistenceTest, SelectsAllDriversOnlyForLicensedUsersWithoutAPreference) {
-  EXPECT_FALSE(config::select_all_gamepad_drivers_if_licensed(false));
-  EXPECT_TRUE(config::input.gamepad_driver.empty());
-  EXPECT_TRUE(file_handler::read_file(config_file().string().c_str()).empty());
-
-  EXPECT_TRUE(config::select_all_gamepad_drivers_if_licensed(true));
-  EXPECT_EQ(config::input.gamepad_driver, config::GAMEPAD_DRIVER_ALL);
-  EXPECT_EQ(file_handler::read_file(config_file().string().c_str()), "gamepad_driver = all\n");
-
-  EXPECT_FALSE(config::select_all_gamepad_drivers_if_licensed(true));
-  EXPECT_EQ(file_handler::read_file(config_file().string().c_str()), "gamepad_driver = all\n");
+  EXPECT_FALSE(config::persist_config_option_if_missing("gamepad_driver", "hidmaestro"));
+  EXPECT_EQ(file_handler::read_file(config_file().string().c_str()), "gamepad_driver = none\n");
 }
 
 TEST_F(ConfigPersistenceTest, AcceptsAllGamepadProfilesAcrossRepeatedConfigurationChanges) {
@@ -200,7 +187,7 @@ TEST_F(ConfigPersistenceTest, AcceptsAllGamepadProfilesAcrossRepeatedConfigurati
   ASSERT_EQ(file_handler::write_file(apps_file.string().c_str(), "{}"), 0);
   config::stream.file_apps = apps_file.string();
 
-  constexpr std::array profiles {"generic"sv, "x360"sv, "xone"sv, "xseries"sv, "ds4"sv, "ds5"sv, "switch"sv};
+  constexpr std::array profiles {"x360"sv, "xone"sv, "xseries"sv, "ds4"sv, "ds5"sv, "ds5e"sv};
   for (const auto profile : profiles) {
     config::input.gamepad = "auto";
     config::apply_config_for_test(std::string {"gamepad = "} + std::string {profile} + "\n");

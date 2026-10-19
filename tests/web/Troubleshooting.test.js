@@ -13,32 +13,14 @@ import en from '../../src_assets/common/assets/web/public/assets/locale/en.json'
  * @brief Mount troubleshooting with mocked API responses and an optional Vue I18n instance.
  *
  * @param {string} platform Host platform.
- * @param {string} gamepadDriver Selected gamepad driver.
- * @param {object} licenseStatus License status overrides.
  * @param {Array} permissions Platform permissions.
  * @param {object|null} i18n Optional Vue I18n plugin.
  * @return {Promise<object>} Mounted troubleshooting wrapper.
  */
-async function mountTroubleshooting(platform, gamepadDriver, licenseStatus = {}, permissions = [], i18n = null) {
+async function mountTroubleshooting(platform, permissions = [], i18n = null) {
   vi.stubGlobal('fetch', vi.fn(async (url) => {
     if (url === '/api/config') {
-      return { json: async () => ({ platform, gamepad_driver: gamepadDriver }) }
-    }
-    if (url === '/api/virtual-input/status') {
-      return {
-        json: async () => ({
-          virtualhid: {
-            installed: true,
-            version: '2026.914.1218',
-            version_compatible: true,
-            supported_versions: '>= 2026.914.1218',
-          },
-          vigembus: { installed: false },
-        }),
-      }
-    }
-    if (url === '/api/virtual-input/license') {
-      return { ok: true, json: async () => ({ service_available: true, state: 'licensed', licensed: true, ...licenseStatus }) }
+      return { json: async () => ({ platform }) }
     }
     if (url === './api/permissions') {
       return { ok: true, json: async () => ({ permissions }) }
@@ -74,7 +56,7 @@ afterEach(() => {
   vi.restoreAllMocks()
 })
 
-describe('virtual input troubleshooting', () => {
+describe('troubleshooting permissions', () => {
   it.each([
     ['valid', false],
     ['malformed', true],
@@ -93,7 +75,7 @@ describe('virtual input troubleshooting', () => {
       json: async () => url === './api/configLocale' ? { locale: 'de' } : catalog,
     })))
     const i18n = await createSunshineI18n()
-    const wrapper = await mountTroubleshooting('linux', 'none', {}, [
+    const wrapper = await mountTroubleshooting('linux', [
       { id: 'input', status: 'granted', required: true },
     ], i18n)
 
@@ -129,7 +111,7 @@ describe('virtual input troubleshooting', () => {
       { id: 'screen_recording', status: 'granted', required: true },
     ]
     for (const platform of ['macos', 'windows']) {
-      const wrapper = await mountTroubleshooting(platform, 'none', {}, permissions)
+      const wrapper = await mountTroubleshooting(platform, permissions)
       expect(wrapper.findAll('.permission-table-shell tbody tr').map(row => row.get('strong').text())).toEqual([
         'troubleshooting.permission_screen_recording',
         'troubleshooting.permission_input',
@@ -144,7 +126,7 @@ describe('virtual input troubleshooting', () => {
   })
 
   it('shows macOS permission status and requests access from the row button', async () => {
-    const wrapper = await mountTroubleshooting('macos', 'all', {}, [
+    const wrapper = await mountTroubleshooting('macos', [
       { id: 'screen_recording', status: 'denied', required: true, requestable: true },
       { id: 'notifications', status: 'granted', required: false },
       { id: 'system_audio', status: 'on_use', required: true, requestable: true },
@@ -176,7 +158,7 @@ describe('virtual input troubleshooting', () => {
   })
 
   it('shows macOS input access recovery steps when the request button is used', async () => {
-    const wrapper = await mountTroubleshooting('macos', 'all', {}, [
+    const wrapper = await mountTroubleshooting('macos', [
       { id: 'input', status: 'denied', required: true, requestable: true },
     ])
 
@@ -192,7 +174,7 @@ describe('virtual input troubleshooting', () => {
   })
 
   it('shows Local Network setup steps after opening Privacy & Security', async () => {
-    const wrapper = await mountTroubleshooting('macos', 'all', {}, [
+    const wrapper = await mountTroubleshooting('macos', [
       { id: 'local_network', status: 'on_use', required: true, requestable: true },
     ])
 
@@ -209,7 +191,7 @@ describe('virtual input troubleshooting', () => {
   })
 
   it('shows Windows directory access with setup steps', async () => {
-    const wrapper = await mountTroubleshooting('windows', 'all', {}, [
+    const wrapper = await mountTroubleshooting('windows', [
       { id: 'config_directory', status: 'denied', required: true, verifiable: true, requestable: false },
     ])
     expect(wrapper.find('#permissions').exists()).toBe(true)
@@ -222,7 +204,7 @@ describe('virtual input troubleshooting', () => {
   })
 
   it('shows Linux input setup steps', async () => {
-    const wrapper = await mountTroubleshooting('linux', 'none', {}, [
+    const wrapper = await mountTroubleshooting('linux', [
       { id: 'input', status: 'denied', required: true, verifiable: true, requestable: false },
     ])
     await wrapper.get('.permission-table-shell tbody button').trigger('click')
@@ -230,52 +212,8 @@ describe('virtual input troubleshooting', () => {
     wrapper.unmount()
   })
 
-  it('shows the broker version table without ViGEmBus on macOS', async () => {
-    const wrapper = await mountTroubleshooting('macos', 'all')
-
-    expect(wrapper.find('.virtual-gamepad-section').exists()).toBe(true)
-    expect(wrapper.findAll('.driver-table-shell tbody tr')).toHaveLength(1)
-    expect(wrapper.find('.driver-table-shell').text()).toContain('2026.914.1218')
-    const status = wrapper.get('.driver-status-icon')
-    expect(status.classes()).toContain('status-icon-success')
-    expect(status.get('svg').exists()).toBe(true)
-    expect(status.get('.visually-hidden').text()).toBe('troubleshooting.driver_status_compatible')
-    expect(status.attributes('title')).toBe('troubleshooting.driver_status_compatible')
-    expect(status.attributes('role')).toBeUndefined()
-    expect(status.attributes('tabindex')).toBeUndefined()
-    expect(fetch).toHaveBeenCalledWith('/api/virtual-input/status')
-    wrapper.unmount()
-  })
-
-  it.each(['macos', 'windows'])('shows only the license activation limit on %s', async platform => {
-    const wrapper = await mountTroubleshooting(platform, 'all', { activation_usage: 1, activation_limit: 5 })
-
-    const activation = wrapper.findAll('.virtualhid-license-stat').find(stat =>
-      stat.find('dt').text() === 'troubleshooting.virtualhid_license_activation_limit'
-    )
-    expect(activation.find('dd').text()).toBe('5')
-    wrapper.unmount()
-  })
-
-  it('keeps both backend rows on Windows when all backends are enabled', async () => {
-    const wrapper = await mountTroubleshooting('windows', 'all')
-
-    expect(wrapper.findAll('.driver-table-shell tbody tr')).toHaveLength(2)
-    const vigembusStatus = wrapper.get('#vigembus .driver-status-icon')
-    expect(vigembusStatus.classes()).toContain('status-icon-neutral')
-    expect(vigembusStatus.attributes('title')).toBe('troubleshooting.driver_status_not_installed')
-    expect(vigembusStatus.get('.visually-hidden').text()).toBe('troubleshooting.driver_status_not_installed')
-    wrapper.vm.virtualhid.version_compatible = false
-    await wrapper.vm.$nextTick()
-    const unsupportedStatus = wrapper.get('.driver-table-shell tbody tr:first-child .driver-status-icon')
-    expect(unsupportedStatus.classes()).toContain('status-icon-danger')
-    expect(unsupportedStatus.attributes('title')).toBe('troubleshooting.driver_status_unsupported')
-    expect(unsupportedStatus.get('.visually-hidden').text()).toBe('troubleshooting.driver_status_unsupported')
-    wrapper.unmount()
-  })
-
   it('shows distinct icons for granted, unrequested, and unknown permissions', async () => {
-    const wrapper = await mountTroubleshooting('macos', 'all', {}, [
+    const wrapper = await mountTroubleshooting('macos', [
       { id: 'notifications', status: 'granted', required: false },
       { id: 'microphone', status: 'not_determined', required: false, requestable: true },
       { id: 'input', status: 'unknown', required: true },

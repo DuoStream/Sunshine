@@ -2,18 +2,24 @@
  * @file src/platform/windows/display_base.cpp
  * @brief Definitions for the Windows display base code.
  */
+// standard includes
 #include <cmath>
-#include <initguid.h>
 #include <thread>
 
-#include <boost/algorithm/string/join.hpp>
-#include <boost/process.hpp>
-#include <shtypes.h>
-#include <shellscalingapi.h>
-#include <windows.h>
+// platform includes
+#include <initguid.h>
 
-// We have to include boost/process.hpp before display.h due to WinSock.h,
-// but that prevents the definition of NTSTATUS so we must define it ourself.
+// local includes required before library includes
+// Boost.Process must be included before MinHook pulls in Windows.h so Boost.Asio sees WinSock2.h first.
+#include "src/boost_process_compat.h"
+
+// lib includes
+#include <boost/algorithm/string/join.hpp>
+
+// local includes
+#include "utf_utils.h"
+
+// Including Boost.Process before Windows.h prevents the definition of NTSTATUS, so we must define it ourselves.
 typedef long NTSTATUS;
 
 #include "display.h"
@@ -23,58 +29,56 @@ typedef long NTSTATUS;
 #include "src/platform/common.h"
 #include "src/video.h"
 
+#include <shellscalingapi.h>
+#include <shtypes.h>
+#include <windows.h>
+
 namespace platf {
   using namespace std::literals;
 }
-namespace platf::dxgi {
-  namespace bp = boost::process;
 
-  float GetPrimaryMonitorScale(PRECT desktopRectangle)
-  {
+namespace platf::dxgi {
+  namespace bp = boost::process::v1;
+
+  float GetPrimaryMonitorScale(PRECT desktopRectangle) {
     float scale = 1.0f;
-    const POINT ptZero = { 0, 0 };
+    const POINT ptZero = {0, 0};
     HMONITOR monitor = MonitorFromPoint(ptZero, MONITOR_DEFAULTTOPRIMARY);
-    if (monitor != NULL)
-    {
+    if (monitor != NULL) {
       MONITORINFOEX monitorInfo = {0};
       monitorInfo.cbSize = sizeof(monitorInfo);
-      if (GetMonitorInfoA(monitor, (LPMONITORINFO)&monitorInfo))
-      {
+      if (GetMonitorInfoA(monitor, (LPMONITORINFO) &monitorInfo)) {
         DEVMODE deviceInfo = {0};
         deviceInfo.dmSize = sizeof(deviceInfo);
-        if (EnumDisplaySettingsA(monitorInfo.szDevice, ENUM_CURRENT_SETTINGS, &deviceInfo))
-        {
-          scale = (float)deviceInfo.dmPelsWidth / (float)(desktopRectangle->right - desktopRectangle->left);
-          float value = (int)(scale * 100 + .5);
-          scale = (float)value / 100;
+        if (EnumDisplaySettingsA(monitorInfo.szDevice, ENUM_CURRENT_SETTINGS, &deviceInfo)) {
+          scale = (float) deviceInfo.dmPelsWidth / (float) (desktopRectangle->right - desktopRectangle->left);
+          float value = (int) (scale * 100 + .5);
+          scale = (float) value / 100;
         }
       }
     }
     return scale;
   }
 
-  void duplication_t::map_shared_buffer(ID3D11Device* baseDevice) {
+  void duplication_t::map_shared_buffer(ID3D11Device *baseDevice) {
     // We haven't opened the shared buffer handle yet
-    if (sharedBufferHandle == NULL)
-    {
+    if (sharedBufferHandle == NULL) {
       // Open the shared buffer handle
       DWORD sessionId = 0;
       ProcessIdToSessionId(GetCurrentProcessId(), &sessionId);
       char sharedBufferName[32];
-      sprintf(sharedBufferName, "Global\\DuoIdd%u", (unsigned int)sessionId);
+      sprintf(sharedBufferName, "Global\\DuoIdd%u", (unsigned int) sessionId);
       sharedBufferHandle = OpenFileMappingA(FILE_MAP_ALL_ACCESS, FALSE, sharedBufferName);
 
       // We managed to open the shared buffer handle
-      if (sharedBufferHandle != NULL)
-      {
+      if (sharedBufferHandle != NULL) {
         // Map the shared buffer
-        sharedBuffer = (PRdpIddCaptureBuffer)MapViewOfFile(sharedBufferHandle, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(RdpIddCaptureBuffer));
+        sharedBuffer = (PRdpIddCaptureBuffer) MapViewOfFile(sharedBufferHandle, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(RdpIddCaptureBuffer));
       }
     }
 
     // We need to re-duplicate the shared framebuffer handle
-    if (sharedBuffer != NULL && sharedBuffer->WUDFHostProcessId != 0 && sharedBuffer->WUDFHostFrameBufferHandle != wudfFrameBufferHandle && frameBufferHandle != NULL)
-    {
+    if (sharedBuffer != NULL && sharedBuffer->WUDFHostProcessId != 0 && sharedBuffer->WUDFHostFrameBufferHandle != wudfFrameBufferHandle && frameBufferHandle != NULL) {
       // Close the previous shared framebuffer handle
       CloseHandle(frameBufferHandle);
 
@@ -83,25 +87,20 @@ namespace platf::dxgi {
     }
 
     // It's time to open the shared framebuffer texture
-    if (sharedBuffer != NULL && sharedBuffer->WUDFHostProcessId != 0 && sharedBuffer->WUDFHostFrameBufferHandle != NULL && frameBufferHandle == NULL)
-    {
+    if (sharedBuffer != NULL && sharedBuffer->WUDFHostProcessId != 0 && sharedBuffer->WUDFHostFrameBufferHandle != NULL && frameBufferHandle == NULL) {
       // Open the wudfhost.exe process
       HANDLE wudfHostProcess = OpenProcess(PROCESS_ALL_ACCESS, FALSE, sharedBuffer->WUDFHostProcessId);
-      if (wudfHostProcess != NULL)
-      {
+      if (wudfHostProcess != NULL) {
         // Open a true handle to this sunshine.exe process
         HANDLE sunshineProcess = OpenProcess(PROCESS_ALL_ACCESS, FALSE, GetCurrentProcessId());
-        if (sunshineProcess != NULL)
-        {
+        if (sunshineProcess != NULL) {
           // Keep track of the wudfhost.exe-sided handle
           wudfFrameBufferHandle = sharedBuffer->WUDFHostFrameBufferHandle;
 
           // Duplicate the handle into the sunshine process
-          if (DuplicateHandle(wudfHostProcess, wudfFrameBufferHandle, sunshineProcess, &frameBufferHandle, 0, FALSE, DUPLICATE_SAME_ACCESS))
-          {
+          if (DuplicateHandle(wudfHostProcess, wudfFrameBufferHandle, sunshineProcess, &frameBufferHandle, 0, FALSE, DUPLICATE_SAME_ACCESS)) {
             // We have an existing framebuffer texture we need to release
-            if (frameBufferTexture != NULL)
-            {
+            if (frameBufferTexture != NULL) {
               // Release the framebuffer texture
               frameBufferTexture->Release();
 
@@ -120,8 +119,7 @@ namespace platf::dxgi {
     }
 
     // We can and need to re-open the shared texture
-    if ((frameBufferTexture == NULL || baseDevice != frameReaderDevice) && frameBufferHandle != NULL)
-    {
+    if ((frameBufferTexture == NULL || baseDevice != frameReaderDevice) && frameBufferHandle != NULL) {
       // Reset the object
       reset();
 
@@ -129,11 +127,10 @@ namespace platf::dxgi {
       frameReaderDevice = baseDevice;
 
       // Query the ID3D11Device1 interface we need to open shared resources
-      ID3D11Device1* d3d11Device1 = NULL;
-      if (SUCCEEDED(frameReaderDevice->QueryInterface(&d3d11Device1)))
-      {
+      ID3D11Device1 *d3d11Device1 = NULL;
+      if (SUCCEEDED(frameReaderDevice->QueryInterface(&d3d11Device1))) {
         // Open the shared framebuffer texture
-        d3d11Device1->OpenSharedResource1(frameBufferHandle, __uuidof(ID3D11Texture2D), (void**)&frameBufferTexture);
+        d3d11Device1->OpenSharedResource1(frameBufferHandle, __uuidof(ID3D11Texture2D), (void **) &frameBufferTexture);
 
         // Release the D3D11Device1 interface
         d3d11Device1->Release();
@@ -141,34 +138,29 @@ namespace platf::dxgi {
     }
   }
 
-  capture_e duplication_t::iddblt(ID3D11Device* baseDevice, ID3D11Resource** texture)
-  {
+  capture_e duplication_t::iddblt(ID3D11Device *baseDevice, ID3D11Resource **texture) {
     // The capture result
     capture_e result = capture_e::timeout;
 
     // The frame ready event hasn't been opened yet
-    if (frameReadyEventHandle == NULL)
-    {
+    if (frameReadyEventHandle == NULL) {
       // Open the frame ready event
       DWORD sessionId = 0;
       ProcessIdToSessionId(GetCurrentProcessId(), &sessionId);
       char frameReadyEventName[32];
-      sprintf(frameReadyEventName, "Global\\DuoIdd%uFrameReady", (unsigned int)sessionId);
+      sprintf(frameReadyEventName, "Global\\DuoIdd%uFrameReady", (unsigned int) sessionId);
       frameReadyEventHandle = OpenEventA(EVENT_ALL_ACCESS, FALSE, frameReadyEventName);
     }
 
     // The frame producer is ready
-    if (frameReadyEventHandle != NULL)
-    {
+    if (frameReadyEventHandle != NULL) {
       // Wait for the next frame
-      if (WaitForSingleObject(frameReadyEventHandle, 100) == WAIT_OBJECT_0)
-      {
+      if (WaitForSingleObject(frameReadyEventHandle, 100) == WAIT_OBJECT_0) {
         // Map the shared buffer
         map_shared_buffer(baseDevice);
 
         // We have a new frame to return
-        if (baseDevice == frameReaderDevice && sharedBuffer != NULL && sharedBuffer->CapturedFrames != encodedFrames && frameBufferTexture != NULL)
-        {
+        if (baseDevice == frameReaderDevice && sharedBuffer != NULL && sharedBuffer->CapturedFrames != encodedFrames && frameBufferTexture != NULL) {
           // Read the number of captured frames
           SIZE_T capturedFrames = sharedBuffer->CapturedFrames;
 
@@ -176,8 +168,7 @@ namespace platf::dxgi {
           encodedFrames = capturedFrames;
 
           // We need to adjust the mode
-          if (sharedBuffer->Mode.Width != mode.Width || sharedBuffer->Mode.Height != mode.Height || sharedBuffer->Mode.RefreshRate != mode.RefreshRate || (sharedBuffer->Mode.IsHDRSupported && sharedBuffer->Mode.HDR != mode.HDR))
-          {
+          if (sharedBuffer->Mode.Width != mode.Width || sharedBuffer->Mode.Height != mode.Height || sharedBuffer->Mode.RefreshRate != mode.RefreshRate || (sharedBuffer->Mode.IsHDRSupported && sharedBuffer->Mode.HDR != mode.HDR)) {
             // Log the wanted mode
             BOOST_LOG(info) << "Changing the display mode to " << mode.Width << "x" << mode.Height << "@" << mode.RefreshRate << " using the " << (sharedBuffer->Mode.IsHDRSupported && mode.HDR ? "HDR" : "SDR") << " colorspace";
 
@@ -196,8 +187,7 @@ namespace platf::dxgi {
           frameBufferTexture->GetDesc(&desc);
 
           // The desktop resolution or bit-depth changed
-          if (frameBufferTextureDescription.Format != DXGI_FORMAT_UNKNOWN && (frameBufferTextureDescription.Width != desc.Width || frameBufferTextureDescription.Height != desc.Height || frameBufferTextureDescription.Format != desc.Format))
-          {
+          if (frameBufferTextureDescription.Format != DXGI_FORMAT_UNKNOWN && (frameBufferTextureDescription.Width != desc.Width || frameBufferTextureDescription.Height != desc.Height || frameBufferTextureDescription.Format != desc.Format)) {
             // Log the format change
             BOOST_LOG(info) << "Switching stream resolution to " << desc.Width << "x" << desc.Height << " (Format: " << desc.Format << ")";
 
@@ -209,10 +199,9 @@ namespace platf::dxgi {
           }
 
           // The desktop hasn't changed
-          else
-          {
+          else {
             // Return the shared texture
-            *texture = (ID3D11Resource*)frameBufferTexture;
+            *texture = (ID3D11Resource *) frameBufferTexture;
 
             // And let the caller know he can access it
             result = capture_e::ok;
@@ -228,25 +217,21 @@ namespace platf::dxgi {
     return result;
   }
 
-  void duplication_t::resumeSwapChain()
-  {
+  void duplication_t::resumeSwapChain() {
     // We have access to the shared buffer
-    if (sharedBuffer != NULL)
-    {
+    if (sharedBuffer != NULL) {
       // Let the driver know how far along we are with processing
       sharedBuffer->EncodedFrames = encodedFrames;
     }
   }
 
-  bool duplication_t::test(IDXGIAdapter1* baseAdapter1)
-  {
+  bool duplication_t::test(IDXGIAdapter1 *baseAdapter1) {
     // The test result
     bool result = false;
 
     // Query the IDXGIAdapter interface
-    IDXGIAdapter* baseAdapter = NULL;
-    if (SUCCEEDED(baseAdapter1->QueryInterface(IID_IDXGIAdapter, (void **)&baseAdapter)))
-    {
+    IDXGIAdapter *baseAdapter = NULL;
+    if (SUCCEEDED(baseAdapter1->QueryInterface(IID_IDXGIAdapter, (void **) &baseAdapter))) {
       // The accepted feature levels
       D3D_FEATURE_LEVEL featureLevels[] {
         D3D_FEATURE_LEVEL_11_1,
@@ -259,9 +244,8 @@ namespace platf::dxgi {
       };
 
       // Create a temporary ID3D11Device
-      ID3D11Device* baseDevice = nullptr;
-      if (SUCCEEDED(D3D11CreateDevice(baseAdapter, D3D_DRIVER_TYPE_UNKNOWN, nullptr, D3D11_CREATE_DEVICE_FLAGS, featureLevels, sizeof(featureLevels) / sizeof(D3D_FEATURE_LEVEL), D3D11_SDK_VERSION, &baseDevice, nullptr, nullptr)))
-      {
+      ID3D11Device *baseDevice = nullptr;
+      if (SUCCEEDED(D3D11CreateDevice(baseAdapter, D3D_DRIVER_TYPE_UNKNOWN, nullptr, D3D11_CREATE_DEVICE_FLAGS, featureLevels, sizeof(featureLevels) / sizeof(D3D_FEATURE_LEVEL), D3D11_SDK_VERSION, &baseDevice, nullptr, nullptr))) {
         // Test the ID3D11Device
         result = test(baseDevice);
 
@@ -283,8 +267,7 @@ namespace platf::dxgi {
     return result;
   }
 
-  bool duplication_t::test(ID3D11Device* baseDevice)
-  {
+  bool duplication_t::test(ID3D11Device *baseDevice) {
     // Reset the object
     reset();
 
@@ -300,8 +283,7 @@ namespace platf::dxgi {
 
   void duplication_t::reset() {
     // We're holding onto a shared texture
-    if (frameBufferTexture != NULL)
-    {
+    if (frameBufferTexture != NULL) {
       // Release the texture
       frameBufferTexture->Release();
 
@@ -310,8 +292,7 @@ namespace platf::dxgi {
     }
   }
 
-  void duplication_t::changeMode(const ::video::config_t &config)
-  {
+  void duplication_t::changeMode(const ::video::config_t &config) {
     // Log the call
     BOOST_LOG(info) << "Requesting mode change to " << config.width << "x" << config.height << "@" << config.framerate << " using the " << (config.dynamicRange != 0 ? "HDR" : "SDR") << " colorspace";
 
@@ -323,15 +304,14 @@ namespace platf::dxgi {
   }
 
   capture_e
-  display_base_t::capture(const push_captured_image_cb_t &push_captured_image_cb, const pull_free_image_cb_t &pull_free_image_cb, bool *cursor) {
+    display_base_t::capture(const push_captured_image_cb_t &push_captured_image_cb, const pull_free_image_cb_t &pull_free_image_cb, bool *cursor) {
     auto adjust_client_frame_rate = [&]() -> DXGI_RATIONAL {
       // Adjust capture frame interval when display refresh rate is not integral but very close to requested fps.
       if (display_refresh_rate.Denominator > 1) {
         DXGI_RATIONAL candidate = display_refresh_rate;
         if (client_frame_rate % display_refresh_rate_rounded == 0) {
           candidate.Numerator *= client_frame_rate / display_refresh_rate_rounded;
-        }
-        else if (display_refresh_rate_rounded % client_frame_rate == 0) {
+        } else if (display_refresh_rate_rounded % client_frame_rate == 0) {
           candidate.Denominator *= display_refresh_rate_rounded / client_frame_rate;
         }
         double candidate_rate = (double) candidate.Numerator / candidate.Denominator;
@@ -342,7 +322,7 @@ namespace platf::dxgi {
         }
       }
 
-      return { (uint32_t) client_frame_rate, 1 };
+      return {(uint32_t) client_frame_rate, 1};
     };
 
     DXGI_RATIONAL client_frame_rate_adjusted = adjust_client_frame_rate();
@@ -385,8 +365,7 @@ namespace platf::dxgi {
           frame_pacing_group_start = std::nullopt;
           frame_pacing_group_frames = 0;
           status = capture_e::timeout;
-        }
-        else {
+        } else {
           timer->sleep_for(sleep_period);
           sleep_overshoot_logger.first_point(sleep_target);
           sleep_overshoot_logger.second_point_now_and_log();
@@ -395,8 +374,7 @@ namespace platf::dxgi {
 
           if (status == capture_e::ok && img_out) {
             frame_pacing_group_frames += 1;
-          }
-          else {
+          } else {
             frame_pacing_group_start = std::nullopt;
             frame_pacing_group_frames = 0;
           }
@@ -421,7 +399,7 @@ namespace platf::dxgi {
 
       switch (status) {
         case platf::capture_e::reinit:
-        case platf::capture_e::error:
+        case platf::capture_e::capture_error:
         case platf::capture_e::interrupted:
           return status;
         case platf::capture_e::timeout:
@@ -444,7 +422,7 @@ namespace platf::dxgi {
   }
 
   bool
-  set_gpu_preference_on_self(int preference) {
+    set_gpu_preference_on_self(int preference) {
     // The GPU preferences key uses app path as the value name.
     WCHAR sunshine_path[MAX_PATH];
     GetModuleFileNameW(NULL, sunshine_path, ARRAYSIZE(sunshine_path));
@@ -452,12 +430,7 @@ namespace platf::dxgi {
     WCHAR value_data[128];
     swprintf_s(value_data, L"GpuPreference=%d;", preference);
 
-    auto status = RegSetKeyValueW(HKEY_CURRENT_USER,
-      L"Software\\Microsoft\\DirectX\\UserGpuPreferences",
-      sunshine_path,
-      REG_SZ,
-      value_data,
-      (wcslen(value_data) + 1) * sizeof(WCHAR));
+    auto status = RegSetKeyValueW(HKEY_CURRENT_USER, L"Software\\Microsoft\\DirectX\\UserGpuPreferences", sunshine_path, REG_SZ, value_data, (wcslen(value_data) + 1) * sizeof(WCHAR));
     if (status != ERROR_SUCCESS) {
       BOOST_LOG(error) << "Failed to set GPU preference: "sv << status;
       return false;
@@ -468,7 +441,7 @@ namespace platf::dxgi {
   }
 
   bool
-  validate_and_test_gpu_preference(const std::string &display_name, bool verify_frame_capture) {
+    validate_and_test_gpu_preference(const std::string &display_name, bool verify_frame_capture) {
     std::string cmd = "tools\\ddprobe.exe";
 
     // We start at 1 because 0 is automatic selection which can be overridden by
@@ -480,14 +453,13 @@ namespace platf::dxgi {
       //
       // Arg format: [GPU preference] [Display name] [--verify-frame-capture]
       HRESULT result;
-      std::vector<std::string> args = { std::to_string(i), display_name };
+      std::vector<std::string> args = {std::to_string(i), display_name};
       try {
         if (verify_frame_capture) {
           args.emplace_back("--verify-frame-capture");
         }
         result = bp::system(cmd, bp::args(args), bp::std_out > bp::null, bp::std_err > bp::null);
-      }
-      catch (bp::process_error &e) {
+      } catch (bp::process_error &e) {
         BOOST_LOG(error) << "Failed to start ddprobe.exe: "sv << e.what();
         return false;
       }
@@ -502,8 +474,7 @@ namespace platf::dxgi {
         // We found a working GPU preference, so set ourselves to use that.
         if (set_gpu_preference_on_self(i)) {
           return true;
-        }
-        else {
+        } else {
           return false;
         }
       }
@@ -513,8 +484,7 @@ namespace platf::dxgi {
     return false;
   }
 
-  int
-  GetPrimaryMonitorRefreshRate(int defaultValue) {
+  int GetPrimaryMonitorRefreshRate(int defaultValue) {
     // Get the primary monitor's device context
     HDC hdc = GetDC(NULL);
 
@@ -528,8 +498,7 @@ namespace platf::dxgi {
     return refreshRate;
   }
 
-  int
-  display_base_t::init(const ::video::config_t &config, const std::string &display_name) {
+  int display_base_t::init(const ::video::config_t &config, const std::string &display_name) {
     std::once_flag windows_cpp_once_flag;
 
     std::call_once(windows_cpp_once_flag, []() {
@@ -561,13 +530,13 @@ namespace platf::dxgi {
     adapter_t::pointer adapter_p;
     for (int tries = 0; tries < 2; ++tries) {
       for (int x = 0; factory->EnumAdapters1(x, &adapter_p) != DXGI_ERROR_NOT_FOUND; ++x) {
-        dxgi::adapter_t adapter_tmp { adapter_p };
+        dxgi::adapter_t adapter_tmp {adapter_p};
         DXGI_ADAPTER_DESC1 adapter_desc;
         adapter_tmp->GetDesc1(&adapter_desc);
 
         dxgi::output_t::pointer output_p;
         for (int y = 0; adapter_tmp->EnumOutputs(y, &output_p) != DXGI_ERROR_NOT_FOUND; ++y) {
-          dxgi::output_t output_tmp { output_p };
+          dxgi::output_t output_tmp {output_p};
 
           DXGI_OUTPUT_DESC desc;
           output_tmp->GetDesc(&desc);
@@ -582,12 +551,10 @@ namespace platf::dxgi {
             height = (desc.DesktopCoordinates.bottom - offset_y) * scale;
 
             display_rotation = desc.Rotation;
-            if (display_rotation == DXGI_MODE_ROTATION_ROTATE90 ||
-                display_rotation == DXGI_MODE_ROTATION_ROTATE270) {
+            if (display_rotation == DXGI_MODE_ROTATION_ROTATE90 || display_rotation == DXGI_MODE_ROTATION_ROTATE270) {
               width_before_rotation = height;
               height_before_rotation = width;
-            }
-            else {
+            } else {
               width_before_rotation = width;
               height_before_rotation = height;
             }
@@ -648,17 +615,19 @@ namespace platf::dxgi {
     }
 
     int d3d11createdevice_retry_count = 10;
-    retry_d3d11createdevice:
+  retry_d3d11createdevice:
     status = D3D11CreateDevice(
       adapter_p,
       D3D_DRIVER_TYPE_UNKNOWN,
       nullptr,
       D3D11_CREATE_DEVICE_FLAGS,
-      featureLevels, sizeof(featureLevels) / sizeof(D3D_FEATURE_LEVEL),
+      featureLevels,
+      sizeof(featureLevels) / sizeof(D3D_FEATURE_LEVEL),
       D3D11_SDK_VERSION,
       &device,
       &feature_level,
-      &device_ctx);
+      &device_ctx
+    );
 
     adapter_p->Release();
 
@@ -677,7 +646,7 @@ namespace platf::dxgi {
     DXGI_ADAPTER_DESC adapter_desc;
     adapter->GetDesc(&adapter_desc);
 
-    auto description = to_utf8(adapter_desc.Description);
+    auto description = utf_utils::to_utf8(adapter_desc.Description);
     BOOST_LOG(info)
       << std::endl
       << "Device Description : " << description << std::endl
@@ -698,8 +667,7 @@ namespace platf::dxgi {
       HANDLE token;
       LUID val;
 
-      if (OpenProcessToken(GetCurrentProcess(), flags, &token) &&
-          !!LookupPrivilegeValue(NULL, SE_INC_BASE_PRIORITY_NAME, &val)) {
+      if (OpenProcessToken(GetCurrentProcess(), flags, &token) && !!LookupPrivilegeValue(NULL, SE_INC_BASE_PRIORITY_NAME, &val)) {
         tp.PrivilegeCount = 1;
         tp.Privileges[0].Luid = val;
         tp.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
@@ -722,7 +690,7 @@ namespace platf::dxgi {
             return false;
           }
 
-          D3DKMT_OPENADAPTERFROMLUID d3dkmt_adapter = { adapter };
+          D3DKMT_OPENADAPTERFROMLUID d3dkmt_adapter = {adapter};
           if (FAILED(d3dkmt_open_adapter(&d3dkmt_adapter))) {
             BOOST_LOG(error) << "D3DKMTOpenAdapterFromLuid() failed while trying to determine GPU HAGS status";
             return false;
@@ -739,13 +707,12 @@ namespace platf::dxgi {
 
           if (SUCCEEDED(d3dkmt_query_adapter_info(&d3dkmt_adapter_info))) {
             result = d3dkmt_adapter_caps.HwSchEnabled;
-          }
-          else {
+          } else {
             BOOST_LOG(warning) << "D3DKMTQueryAdapterInfo() failed while trying to determine GPU HAGS status";
             result = false;
           }
 
-          D3DKMT_CLOSEADAPTER d3dkmt_close_adapter_wrap = { d3dkmt_adapter.hAdapter };
+          D3DKMT_CLOSEADAPTER d3dkmt_close_adapter_wrap = {d3dkmt_adapter.hAdapter};
           if (FAILED(d3dkmt_close_adapter(&d3dkmt_close_adapter_wrap))) {
             BOOST_LOG(error) << "D3DKMTCloseAdapter() failed while trying to determine GPU HAGS status";
           }
@@ -761,15 +728,16 @@ namespace platf::dxgi {
             // As of 2023.07, NVIDIA driver has unfixed bug(s) where "realtime" can cause unrecoverable encoding freeze or outright driver crash
             // This issue happens more frequently with HAGS, in DX12 games or when VRAM is filled close to max capacity
             // Track OBS to see if they find better workaround or NVIDIA fixes it on their end, they seem to be in communication
-            if (hags_enabled && !config::video.nv_realtime_hags) priority = D3DKMT_SCHEDULINGPRIORITYCLASS_HIGH;
+            if (hags_enabled && !config::video.nv_realtime_hags) {
+              priority = D3DKMT_SCHEDULINGPRIORITYCLASS_HIGH;
+            }
           }
           BOOST_LOG(info) << "Active GPU has HAGS " << (hags_enabled ? "enabled" : "disabled");
           BOOST_LOG(info) << "Using " << (priority == D3DKMT_SCHEDULINGPRIORITYCLASS_HIGH ? "high" : "realtime") << " GPU priority";
           if (FAILED(d3dkmt_set_process_priority(GetCurrentProcess(), priority))) {
             BOOST_LOG(warning) << "Failed to adjust GPU priority. Please run application as administrator for optimal performance.";
           }
-        }
-        else {
+        } else {
           BOOST_LOG(error) << "Couldn't load D3DKMTSetProcessSchedulingPriorityClass function from gdi32.dll to adjust GPU priority";
         }
       }
@@ -839,7 +807,7 @@ namespace platf::dxgi {
   }
 
   bool
-  display_base_t::is_hdr() {
+    display_base_t::is_hdr() {
     dxgi::output6_t output6 {};
 
     auto status = output->QueryInterface(IID_IDXGIOutput6, (void **) &output6);
@@ -871,12 +839,11 @@ namespace platf::dxgi {
     // ApplySRGBCurve, which double-encodes the already-sRGB G22 values,
     // crushing highlights to white. Use this method to route G22+FP16 input
     // through the non-linear shader path (saturate only, no curve).
-    return desc1.ColorSpace == DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709
-        || desc1.ColorSpace == DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P2020;
+    return desc1.ColorSpace == DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709 || desc1.ColorSpace == DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P2020;
   }
 
   bool
-  display_base_t::get_hdr_metadata(SS_HDR_METADATA &metadata) {
+    display_base_t::get_hdr_metadata(SS_HDR_METADATA &metadata) {
     dxgi::output6_t output6 {};
 
     std::memset(&metadata, 0, sizeof(metadata));
@@ -1047,7 +1014,20 @@ namespace platf::dxgi {
     "DXGI_FORMAT_A8P8",
     "DXGI_FORMAT_B4G4R4A4_UNORM",
 
-    NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
 
     "DXGI_FORMAT_P208",
     "DXGI_FORMAT_V208",
@@ -1055,12 +1035,12 @@ namespace platf::dxgi {
   };
 
   const char *
-  display_base_t::dxgi_format_to_string(DXGI_FORMAT format) {
+    display_base_t::dxgi_format_to_string(DXGI_FORMAT format) {
     return format_str[format];
   }
 
   const char *
-  display_base_t::colorspace_to_string(DXGI_COLOR_SPACE_TYPE type) {
+    display_base_t::colorspace_to_string(DXGI_COLOR_SPACE_TYPE type) {
     const char *type_str[] = {
       "DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709",
       "DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709",
@@ -1091,8 +1071,7 @@ namespace platf::dxgi {
 
     if (type < ARRAYSIZE(type_str)) {
       return type_str[type];
-    }
-    else {
+    } else {
       return "UNKNOWN";
     }
   }
@@ -1101,15 +1080,14 @@ namespace platf::dxgi {
 
 namespace platf {
   std::shared_ptr<display_t>
-  display(mem_type_e hwdevice_type, const std::string &display_name, const video::config_t &config) {
+    display(mem_type_e hwdevice_type, const std::string &display_name, const video::config_t &config) {
     if (hwdevice_type == mem_type_e::dxgi) {
       auto disp = std::make_shared<dxgi::display_vram_t>();
 
       if (!disp->init(config, display_name)) {
         return disp;
       }
-    }
-    else if (hwdevice_type == mem_type_e::system) {
+    } else if (hwdevice_type == mem_type_e::system) {
       auto disp = std::make_shared<dxgi::display_ram_t>();
 
       if (!disp->init(config, display_name)) {
@@ -1121,7 +1099,7 @@ namespace platf {
   }
 
   std::vector<std::string>
-  display_names(mem_type_e) {
+    display_names(mem_type_e) {
     std::vector<std::string> display_names;
 
     HRESULT status;
@@ -1143,7 +1121,7 @@ namespace platf {
       BOOST_LOG(debug)
         << std::endl
         << "====== ADAPTER ====="sv << std::endl
-        << "Device Name      : "sv << to_utf8(adapter_desc.Description) << std::endl
+        << "Device Name      : "sv << utf_utils::to_utf8(adapter_desc.Description) << std::endl
         << "Device Vendor ID : 0x"sv << util::hex(adapter_desc.VendorId).to_string_view() << std::endl
         << "Device Device ID : 0x"sv << util::hex(adapter_desc.DeviceId).to_string_view() << std::endl
         << "Device Video Mem : "sv << adapter_desc.DedicatedVideoMemory / 1048576 << " MiB"sv << std::endl
@@ -1154,12 +1132,12 @@ namespace platf {
 
       dxgi::output_t::pointer output_p {};
       for (int y = 0; adapter->EnumOutputs(y, &output_p) != DXGI_ERROR_NOT_FOUND; ++y) {
-        dxgi::output_t output { output_p };
+        dxgi::output_t output {output_p};
 
         DXGI_OUTPUT_DESC desc;
         output->GetDesc(&desc);
 
-        auto device_name = to_utf8(desc.DeviceName);
+        auto device_name = utf_utils::to_utf8(desc.DeviceName);
 
         auto width = desc.DesktopCoordinates.right - desc.DesktopCoordinates.left;
         auto height = desc.DesktopCoordinates.bottom - desc.DesktopCoordinates.top;
@@ -1185,7 +1163,7 @@ namespace platf {
    * @return `true` if a change has occurred or if it is unknown whether a change occurred.
    */
   bool
-  needs_encoder_reenumeration() {
+    needs_encoder_reenumeration() {
     // Serialize access to the static DXGI factory
     static std::mutex reenumeration_state_lock;
     auto lg = std::lock_guard(reenumeration_state_lock);
@@ -1205,8 +1183,7 @@ namespace platf {
       // can deal with any initialization races that may occur when the system is booting.
       BOOST_LOG(info) << "Encoder reenumeration is required"sv;
       return true;
-    }
-    else {
+    } else {
       // The DXGI factory from last time is still current, so no encoder changes have occurred.
       return false;
     }

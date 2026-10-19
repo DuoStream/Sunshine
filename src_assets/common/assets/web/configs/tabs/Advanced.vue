@@ -59,35 +59,6 @@ const config = ref(props.config)
       <div class="form-text">{{ $t('config.av1_mode_desc') }}</div>
     </div>
 
-    <!-- Capture -->
-    <div class="mb-3" v-if="platform !== 'macos'">
-      <label for="capture" class="form-label">{{ $t('config.capture') }}</label>
-      <select id="capture" class="form-select" v-model="config.capture">
-        <option value="">{{ $t('_common.autodetect') }}</option>
-        <PlatformLayout :platform="platform">
-          <template #freebsd>
-            <option value="wlr">wlroots</option>
-            <option value="x11">X11</option>
-            <option value="portal">XDG Portal</option>
-          </template>
-          <template #linux>
-            <option value="nvfbc">NvFBC</option>
-            <option value="wlr">wlroots</option>
-            <option value="kms">KMS</option>
-            <option value="x11">X11</option>
-            <option value="kwin">KWin Screencast</option>
-            <option value="portal">XDG Portal</option>
-          </template>
-          <template #windows>
-            <option value="ddx">Desktop Duplication API</option>
-            <option value="wgc">Windows.Graphics.Capture {{ $t('_common.beta') }}</option>
-          </template>
-        </PlatformLayout>
-      </select>
-      <div class="form-text">{{ $t('config.capture_desc') }}</div>
-    </div>
-
-    <!-- FP16 SDR Gamma Encoded -->
     <Checkbox v-if="platform === 'windows'"
               class="mb-3"
               id="fp16_sdr_gamma_encoded"

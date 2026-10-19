@@ -120,13 +120,6 @@ if(SUNSHINE_ENABLE_TRAY AND (WIN32 OR APPLE OR CMAKE_SYSTEM_NAME STREQUAL "Linux
             "${SUNSHINE_TRAY_TEST_ICON_DESTINATION_DIR}/logo-sunshine.svg"
             COPYONLY)
 
-    if(WIN32 OR APPLE)
-        configure_file(
-                "${CMAKE_SOURCE_DIR}/third-party/libvirtualhid/libvirtualhid.svg"
-                "${SUNSHINE_TRAY_TEST_ICON_DESTINATION_DIR}/logo-libvirtualhid.svg"
-                COPYONLY)
-    endif()
-
     set(SUNSHINE_TRAY_TEST_ICONS
             sunshine-locked.svg
             sunshine-playing.svg
