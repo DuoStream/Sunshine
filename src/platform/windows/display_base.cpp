@@ -527,15 +527,19 @@ namespace platf::dxgi {
       return -1;
     }
 
-    adapter_t::pointer adapter_p;
+    adapter_t::pointer adapter_p {};
     for (int tries = 0; tries < 2; ++tries) {
-      for (int x = 0; factory->EnumAdapters1(x, &adapter_p) != DXGI_ERROR_NOT_FOUND; ++x) {
+      // EnumAdapters1/EnumOutputs report the end of the list with DXGI_ERROR_NOT_FOUND, but a
+      // virtual display driver can fail a single entry outright - DuoIdd returns
+      // DXGI_ERROR_INVALID_VIDPN, for example. Treat only success as an entry, otherwise the
+      // untouched out pointer is handed to the smart pointer below and dereferenced.
+      for (int x = 0; factory->EnumAdapters1(x, &adapter_p) == S_OK; ++x) {
         dxgi::adapter_t adapter_tmp {adapter_p};
         DXGI_ADAPTER_DESC1 adapter_desc;
         adapter_tmp->GetDesc1(&adapter_desc);
 
-        dxgi::output_t::pointer output_p;
-        for (int y = 0; adapter_tmp->EnumOutputs(y, &output_p) != DXGI_ERROR_NOT_FOUND; ++y) {
+        dxgi::output_t::pointer output_p {};
+        for (int y = 0; adapter_tmp->EnumOutputs(y, &output_p) == S_OK; ++y) {
           dxgi::output_t output_tmp {output_p};
 
           DXGI_OUTPUT_DESC desc;
@@ -1114,7 +1118,7 @@ namespace platf {
     }
 
     dxgi::adapter_t adapter;
-    for (int x = 0; factory->EnumAdapters1(x, &adapter) != DXGI_ERROR_NOT_FOUND; ++x) {
+    for (int x = 0; factory->EnumAdapters1(x, &adapter) == S_OK; ++x) {
       DXGI_ADAPTER_DESC1 adapter_desc;
       adapter->GetDesc1(&adapter_desc);
 
@@ -1131,7 +1135,7 @@ namespace platf {
         << "    ====== OUTPUT ======"sv << std::endl;
 
       dxgi::output_t::pointer output_p {};
-      for (int y = 0; adapter->EnumOutputs(y, &output_p) != DXGI_ERROR_NOT_FOUND; ++y) {
+      for (int y = 0; adapter->EnumOutputs(y, &output_p) == S_OK; ++y) {
         dxgi::output_t output {output_p};
 
         DXGI_OUTPUT_DESC desc;
