@@ -405,19 +405,8 @@ brew uninstall sunshine
 ### macOS
 
 > [!IMPORTANT]
-> Virtual gamepads require the separately installed, licensed
-> [Virtual HID Broker](https://github.com/LizardByte/libvirtualhid/releases/latest).
-
-To use gamepads, download the macOS universal libvirtualhid DMG from the link above. Open it and run
-**Install libvirtualhid.command** to install Virtual HID Broker. In **System Settings > Privacy & Security >
-Device Control and Data Access**, add `/Applications/VirtualHIDBroker.app` and enable it. Restart the broker if
-you changed this permission with `sudo launchctl kickstart -k system/dev.lizardbyte.app.libvirtualhid`.
-Activate the machine license in Sunshine’s
-**Troubleshooting > Virtual HID Broker License** section. In **Configuration > Input**, turn on **Enable Gamepad Input**
-and choose the emulated gamepad. The Gamepad Backend setting can be set to **None** to disable gamepads without affecting
-keyboard or mouse input. Sunshine’s menu bar **Virtual HID Broker** submenu shows the license status and links
-for license management and downloads. Sunshine’s DMG does not contain the broker. Keyboard and mouse input use the
-standard macOS synthetic-input permission path.
+> Virtual gamepads are not available on macOS in the Duo build. Keyboard and mouse input use the standard macOS
+> synthetic-input permission path.
 
 #### DMG
 
@@ -582,9 +571,8 @@ access was unavailable, or when you use its Web UI button. The button also opens
 settings. macOS does not offer Sunshine a passive status check for Local Network
 or System Audio Recording, so the Web UI identifies them as permissions handled when used. The Local Network button
 opens **Privacy & Security**; choose **Local Network** there to manage app access.
-Sunshine uses libvirtualhid to send keyboard and mouse events through CoreGraphics. Virtual gamepads use the separately
-installed Virtual HID Broker described in the macOS gamepad setup above. Sunshine shows the broker's availability and
-license under **Troubleshooting > Virtual Input**.
+Sunshine sends macOS keyboard and mouse events through CoreGraphics. Virtual gamepads are not available on macOS in
+the Duo build.
 If a macOS privacy switch is enabled but Sunshine still reports access denied, remove that Sunshine entry and add the
 installed app again. Development builds should use a consistent Apple-issued signing identity so macOS can recognize
 the app across updates.
@@ -604,38 +592,12 @@ and enter its device name in the [audio_sink](configuration.md#audio_sink) field
 > Gamepads are not currently supported.
 
 ### Windows
-Sunshine supports two virtual gamepad backends on Windows. You can install the
-[Virtual HID Broker](https://github.com/LizardByte/libvirtualhid/releases/latest) separately as an optional paid upgrade.
-Its Windows package includes a broker service and user-mode driver for a Raw Input keyboard and mouse plus full virtual
-gamepad support. ViGEmBus remains available as a limited alternative for Xbox 360 and DualShock 4 gamepads, but it has reached end of life.
+Duo creates virtual gamepads through the HID Maestro virtual HID driver, which the Duo installer puts down with the
+rest of the Duo files. No separate download, driver install, or license is required.
 
-When Virtual HID Broker is used, Sunshine requires libvirtualhid version `2026.914.1218.10` or newer.
-
-Compared with the ViGEmBus fallback, Virtual HID Broker can create Xbox One, Xbox Series, DualSense, Nintendo Switch
-Pro, and Generic gamepads in addition to Xbox 360 and DualShock 4. It can also expose controller-specific features such
-as motion, touchpads, LEDs, and adaptive triggers when supported. Virtual HID Broker is actively developed and
-supported by the LizardByte team.
-
-With a compatible driver and active license, normal key transitions are exposed through a real HID keyboard so
-applications using Raw Input can receive them. Unicode text input and keys outside the supported HID keyboard page
-continue to use Windows input injection. When the driver-backed keyboard cannot be created because the driver,
-broker, or license is unavailable, libvirtualhid retains its legacy SendInput fallback.
-
-Relative mouse movement, buttons, and scrolling are exposed as a real HID
-mouse so applications using Raw Input can receive them. Absolute mouse positioning continues to use Windows input
-injection. When the driver-backed mouse cannot be created, libvirtualhid retains its legacy SendInput fallback.
-
-The Virtual HID Broker requires an active paid machine license for driver-backed devices, including gamepads and the Raw
-Input keyboard and mouse. Sunshine shows the current license status and actions on the Web UI Troubleshooting page and
-in the **Virtual HID Broker** system tray submenu. In **Configuration > Input**, choose whether Sunshine may use **All
-Available Drivers**, only **Virtual HID Broker**, or only **ViGEmBus**. Sunshine continues to show the selection prompt
-until this setting is saved. If an active Virtual HID Broker license is already present, Sunshine selects **All Available
-Drivers** automatically. That policy prefers Virtual HID Broker. When its license is not valid, Sunshine falls back to
-ViGEmBus for Xbox 360 and DualShock 4 gamepads and to SendInput for keyboard and mouse. Selecting only **ViGEmBus**
-suppresses Virtual HID Broker startup notifications and limits the available emulated gamepads to Xbox 360 and
-DualShock 4. **None** disables all virtual gamepads and their startup notices without affecting keyboard or mouse
-input. Sunshine recreates the shared keyboard and mouse after a successful license action, so switching between
-the HID and SendInput paths does not require restarting Sunshine.
+HID Maestro exposes Xbox 360, Xbox One, Xbox Series, DualShock 4, DualSense and DualSense Edge gamepads. Set
+[gamepad_driver](configuration.md#gamepad_driver) to `none` to disable virtual gamepads; keyboard and mouse input is
+unaffected.
 
 After installing or updating virtual input drivers, it is recommended to restart your computer.
 
@@ -771,8 +733,7 @@ All shortcuts start with `Ctrl+Alt+Shift`, just like Moonlight.
   The following are known limitations.
 
   * Only X11 and Wayland capture are supported
-  * Gamepads use libvirtualhid's uinput backend, so descriptor-driven features such as motion, touchpad input,
-    battery state, RGB LEDs, adaptive triggers, and raw HID output reports are unavailable
+  * Virtual gamepads are not available in the Duo build
 
 
 ### HDR Support

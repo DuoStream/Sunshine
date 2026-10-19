@@ -331,42 +331,31 @@ consent prompt for directory ACLs, so the Web UI shows setup steps for correctin
     <tr>
         <td>Description</td>
         <td colspan="2">
-            Controls which virtual gamepad backend Sunshine may use on Windows and macOS. On Windows, the Web UI and
-            startup notification request a choice while this option is not set. If Sunshine detects an active Virtual
-            HID Broker license on Windows, it automatically sets this option to `all` when it is missing.
-            @warning{ViGEmBus has limited gamepad features, supports only Xbox 360 and DualShock 4 emulation, and has
-            reached end of life. Selecting `vigembus` also suppresses Virtual HID Broker startup notifications.}
-            @note{`all` and `vigembus` apply only to Windows. On macOS, an unset value uses Virtual HID Broker.}
+            Controls which virtual gamepad backend Sunshine may use. Duo creates virtual gamepads through the
+            HID Maestro virtual HID driver, which is installed with Duo.
+            @note{Setting this option to anything other than the choices below is a configuration error.}
         </td>
     </tr>
     <tr>
         <td>Default</td>
         <td colspan="2">@code{}
-            not set
+            hidmaestro
             @endcode</td>
     </tr>
     <tr>
         <td>Example</td>
         <td colspan="2">@code{}
-            gamepad_driver = all
+            gamepad_driver = hidmaestro
             @endcode</td>
     </tr>
     <tr>
-        <td rowspan="4">Choices</td>
-        <td>all</td>
-        <td>Windows only: prefer Virtual HID Broker when it is available and licensed, with ViGEmBus as a limited fallback.</td>
-    </tr>
-    <tr>
-        <td>virtualhid</td>
-        <td>Use Virtual HID Broker for gamepads. An active paid license is required; Windows ViGEmBus fallback is disabled.</td>
-    </tr>
-    <tr>
-        <td>vigembus</td>
-        <td>Windows only: use ViGEmBus for gamepads and hide Virtual HID Broker status and licensing details.</td>
+        <td rowspan="2">Choices</td>
+        <td>hidmaestro</td>
+        <td>Create virtual gamepads through the HID Maestro virtual HID driver.</td>
     </tr>
     <tr>
         <td>none</td>
-        <td>Disable virtual gamepads on Windows and macOS without changing keyboard or mouse input. Suppress broker and driver choice notices.</td>
+        <td>Disable virtual gamepads without changing keyboard or mouse input.</td>
     </tr>
 </table>
 
@@ -379,7 +368,7 @@ consent prompt for directory ACLs, so the Web UI shows setup steps for correctin
             The type of gamepad to emulate on the host. Automatic selection uses the controller type
             reported by the client. If the type is unknown, Sunshine can select a PlayStation-style
             controller from reported motion or touchpad support; otherwise it uses an Xbox-style controller.
-            @note{When gamepad_driver is `vigembus` on Windows, only auto, x360, and ds4 are available.}
+            @note{Every choice is created through the backend selected by `gamepad_driver`.}
         </td>
     </tr>
     <tr>
@@ -395,21 +384,17 @@ consent prompt for directory ACLs, so the Web UI shows setup steps for correctin
             @endcode</td>
     </tr>
     <tr>
-        <td rowspan="7">Choices</td>
-        <td>generic</td>
-        <td>Generic HID gamepad</td>
-    </tr>
-    <tr>
+        <td rowspan="6">Choices</td>
         <td>ds4</td>
         <td>DualShock 4 controller (PS4)</td>
     </tr>
     <tr>
         <td>ds5</td>
-        <td>DualShock 5 controller (PS5)</td>
+        <td>DualSense controller (PS5)</td>
     </tr>
     <tr>
-        <td>switch</td>
-        <td>Switch Pro controller</td>
+        <td>ds5e</td>
+        <td>DualSense Edge controller (PS5)</td>
     </tr>
     <tr>
         <td>x360</td>
@@ -502,29 +487,6 @@ consent prompt for directory ACLs, so the Web UI shows setup steps for correctin
         <td>Example</td>
         <td colspan="2">@code{}
             touchpad_as_ds4 = enabled
-            @endcode</td>
-    </tr>
-</table>
-
-### virtualhid_randomize_mac
-
-<table>
-    <tr>
-        <td>Description</td>
-        <td colspan="2">
-            Randomize the MAC address for PlayStation-style virtual controllers created by libvirtualhid.
-        </td>
-    </tr>
-    <tr>
-        <td>Default</td>
-        <td colspan="2">@code{}
-            enabled
-            @endcode</td>
-    </tr>
-    <tr>
-        <td>Example</td>
-        <td colspan="2">@code{}
-            virtualhid_randomize_mac = enabled
             @endcode</td>
     </tr>
 </table>
@@ -2233,6 +2195,8 @@ consent prompt for directory ACLs, so the Web UI shows setup steps for correctin
         <td>Description</td>
         <td colspan="2">
             Force specific screen capture method.
+            @note{On Windows there is one capture method: the DuoIdd virtual display's shared buffer. This option
+            selects a method on Linux and FreeBSD only; on Windows it is ignored.}
         </td>
     </tr>
     <tr>
@@ -2247,7 +2211,7 @@ consent prompt for directory ACLs, so the Web UI shows setup steps for correctin
             @endcode</td>
     </tr>
     <tr>
-        <td rowspan="8">Choices</td>
+        <td rowspan="6">Choices</td>
         <td>nvfbc</td>
         <td>Use NVIDIA Frame Buffer Capture to capture direct to GPU memory. This is usually the fastest method for
             NVIDIA cards. NvFBC does not have native Wayland support and does not work with XWayland.
@@ -2282,17 +2246,6 @@ consent prompt for directory ACLs, so the Web UI shows setup steps for correctin
         <td>x11</td>
         <td>Uses XCB. This is the slowest and most CPU intensive so should be avoided if possible.
             @note{Applies to FreeBSD and Linux only.}</td>
-    </tr>
-    <tr>
-        <td>ddx</td>
-        <td>Use DirectX Desktop Duplication API to capture the display. This is well-supported on Windows machines.
-            @note{Applies to Windows only.}</td>
-    </tr>
-    <tr>
-        <td>wgc</td>
-        <td>(beta feature) Use Windows.Graphics.Capture to capture the display.
-            @note{Applies to Windows only.}
-            @attention{This capture method is not compatible with the Sunshine service.}</td>
     </tr>
 </table>
 
