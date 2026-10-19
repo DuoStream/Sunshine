@@ -293,8 +293,8 @@ int main(int argc, char *argv[]) {
   // Sunshine's NVIDIA control panel profiles are not applied. A Duo session renders through the
   // DuoIdd display driver, so the per-application and global driver profiles sunshine would write
   // have nothing to act on, and writing them leaves an undo file behind that outlives the session
-  // and survives a driver re-install. The restore path below is left in place for a user who
-  // applied those profiles some other way.
+  // and survives a driver re-install. Nothing here touches the NVIDIA driver state; `sunshine
+  // restore-nvprefs-undo` remains available to undo profiles applied some other way.
 
   // Wait as long as possible to terminate Sunshine.exe during logoff/shutdown
   SetProcessShutdownParameters(0x100, SHUTDOWN_NORETRY);
@@ -547,14 +547,6 @@ int main(int argc, char *argv[]) {
 
   task_pool.stop();
   task_pool.join();
-
-#ifdef _WIN32
-  // Restore global NVIDIA control panel settings
-  if (nvprefs_instance.owning_undo_file() && nvprefs_instance.load()) {
-    nvprefs_instance.restore_global_profile();
-    nvprefs_instance.unload();
-  }
-#endif
 
   return lifetime::desired_exit_code;
 }
