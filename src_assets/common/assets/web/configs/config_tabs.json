@@ -90,7 +90,6 @@
       "min_threads": 2,
       "hevc_mode": 0,
       "av1_mode": 0,
-      "capture": "",
       "fp16_sdr_gamma_encoded": "disabled",
       "encoder": ""
     }
