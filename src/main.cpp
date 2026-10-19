@@ -451,7 +451,6 @@ int main(int argc, char *argv[]) {
 
   if (video::probe_encoders()) {
     BOOST_LOG(error) << "Video failed to find working encoder"sv;
-    return -1;
   }
 
   if (http::init()) {
