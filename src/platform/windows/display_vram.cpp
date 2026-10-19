@@ -1007,6 +1007,7 @@ namespace platf::dxgi {
       init(std::shared_ptr<platf::display_t> display, adapter_t::pointer adapter_p, pix_fmt_e pix_fmt) {
       int result = base.init(display, adapter_p, pix_fmt);
       d3d11_device = base.device.get();
+      hardware = d3d11_device != nullptr;
       return result;
     }
 
