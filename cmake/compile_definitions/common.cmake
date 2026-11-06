@@ -94,6 +94,7 @@ if(WIN32)
     # add_nvenc_sdk_implementation: args = `target_name`, `sdk_version`, `sdk_include_dir`
     function(add_nvenc_sdk_implementation target_name sdk_version sdk_include_dir)
         add_library(${target_name} OBJECT ${NVENC_IMPLEMENTATION_SOURCES})
+        target_link_libraries(${target_name} PRIVATE ${Boost_LIBRARIES})
         target_include_directories(${target_name} BEFORE PRIVATE "${sdk_include_dir}")
         target_compile_definitions(${target_name} PRIVATE
                 NVENC_FACTORY_SUFFIX=${sdk_version}
@@ -156,6 +157,9 @@ set(SUNSHINE_TARGET_FILES
         "${CMAKE_SOURCE_DIR}/src/rtsp.cpp"
         "${CMAKE_SOURCE_DIR}/src/rtsp.h"
         "${CMAKE_SOURCE_DIR}/src/stream.cpp"
+        "${CMAKE_SOURCE_DIR}/src/duomic.cpp"
+        "${CMAKE_SOURCE_DIR}/src/duomic.h"
+        "${CMAKE_SOURCE_DIR}/src/duomic_protocol.h"
         "${CMAKE_SOURCE_DIR}/src/stream.h"
         "${CMAKE_SOURCE_DIR}/src/video.cpp"
         "${CMAKE_SOURCE_DIR}/src/video.h"

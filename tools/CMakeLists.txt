@@ -43,6 +43,7 @@ target_compile_options(audio-info PRIVATE ${SUNSHINE_COMPILE_OPTIONS})
 
 add_executable(sunshinesvc sunshinesvc.cpp)
 target_link_libraries(sunshinesvc
+        ${Boost_LIBRARIES}
         ${CMAKE_THREAD_LIBS_INIT}
         wtsapi32
         ${PLATFORM_LIBRARIES})

@@ -26,6 +26,7 @@ extern "C" {
 // local includes
 #include "config.h"
 #include "display_device.h"
+#include "duomic.h"
 #include "globals.h"
 #include "input.h"
 #include "logging.h"
@@ -502,6 +503,7 @@ namespace stream {
    */
   struct session_t {
     config_t config;  ///< Stream or encoder configuration captured for the worker.
+    std::unique_ptr<duomic::microphone> microphone;
 
     safe::mail_t mail;  ///< Mailbox used to distribute packets and lifecycle events.
 
@@ -742,6 +744,14 @@ namespace stream {
    * @param reinjected `true` if this message is being reprocessed after decryption.
    */
   void control_server_t::call(std::uint16_t type, session_t *session, const std::string_view &payload, bool reinjected) {
+    // Only authenticated microphone frames from the negotiated encrypted
+    // control tunnel can reach the per-session audio bridge. Never log audio.
+    if (type == duomic::packet_type) {
+      if (!duomic::allowed(session->config.mlFeatureFlags, session->config.controlProtocolType, reinjected)) return;
+      if (!session->microphone) session->microphone = std::make_unique<duomic::microphone>();
+      session->microphone->submit(payload);
+      return;
+    }
     // If we are using the encrypted control stream protocol, drop any messages that come off the wire unencrypted
     if (session->config.controlProtocolType == 13 && !reinjected && type != packetTypes[IDX_ENCRYPTED]) {
       BOOST_LOG(error) << "Dropping unencrypted message on encrypted control stream: "sv << util::hex(type).to_string_view();

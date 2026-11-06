@@ -21,6 +21,7 @@
 
 // local includes
 #include "src/config.h"
+#include "src/duomic.h"
 #include "src/logging.h"
 #include "src/platform/common.h"
 #include "utf_utils.h"
@@ -825,6 +826,9 @@ namespace platf::audio {
           std::fill_n(sample_buf_pos, n, 0);
         } else {
           std::copy_n(sample_aligned.samples, n, sample_buf_pos);
+          if (channels > 0 && n >= static_cast<std::uint32_t>(channels)) {
+            duomic::suppress_monitor(sample_buf_pos, static_cast<int>(n / channels), channels);
+          }
         }
 
         sample_buf_pos += n;
